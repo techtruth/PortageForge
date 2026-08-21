@@ -1,0 +1,6 @@
+.trunk
+images/
+vm/data/*
+!vm/data/.gitkeep
+vm/targets/*.tar
+vm/targets/*.packages

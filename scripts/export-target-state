@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+out_dir=${1:-vm/targets}
+PORTAGE_DIR=/etc/portage
+PACKAGE_DB=/var/db/pkg
+
+profile_name() {
+  if ! command -v eselect >/dev/null 2>&1; then
+    printf '[export-target] error: eselect not found\n' >&2
+    exit 1
+  fi
+
+  eselect profile show 2>/dev/null | awk '/^  / { print $1; exit }'
+}
+
+binhost_package_atoms() {
+  local category
+  local pkgdir
+  local pn
+  local pnvr
+  local slot
+
+  if [[ ! -d "$PACKAGE_DB" ]]; then
+    return
+  fi
+
+  for pkgdir in "$PACKAGE_DB"/*/*; do
+    [[ -d "$pkgdir" ]] || continue
+    category=${pkgdir%/*}
+    category=${category##*/}
+    pnvr=${pkgdir##*/}
+    pn=${pnvr%-[0-9]*}
+    if [[ -s "$pkgdir/SLOT" ]]; then
+      slot=$(<"$pkgdir/SLOT")
+      slot=${slot%%/*}
+      printf '%s/%s:%s\n' "$category" "$pn" "$slot"
+    else
+      printf '%s/%s\n' "$category" "$pn"
+    fi
+  done | sort -u
+}
+
+copy_if_present() {
+  local source=$1
+  local destination=$2
+
+  if [[ -e "$source" || -L "$source" ]]; then
+    mkdir -p "$(dirname "$destination")"
+    cp -a "$source" "$destination"
+  fi
+}
+
+if [[ ! -f "$PORTAGE_DIR/make.conf" ]]; then
+  printf '[export-target] error: make.conf not found: %s\n' "$PORTAGE_DIR/make.conf" >&2
+  exit 1
+fi
+
+if [[ ! -d "$PACKAGE_DB" ]]; then
+  printf '[export-target] error: package database not found: %s\n' "$PACKAGE_DB" >&2
+  exit 1
+fi
+
+profile=$(profile_name)
+if [[ -z "$profile" ]]; then
+  printf '[export-target] error: could not determine active Gentoo profile\n' >&2
+  exit 1
+fi
+
+target_hostname=$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'target')
+target_hostname=$(printf '%s' "$target_hostname" | tr -c 'A-Za-z0-9._-' '-')
+target_hostname=${target_hostname:-target}
+mkdir -p "$out_dir"
+out_file="${out_dir}/${target_hostname}.tar"
+packages_file="${out_dir}/${target_hostname}.packages"
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+mkdir -p "$tmpdir/etc" "$tmpdir/metadata"
+cp -a "$PORTAGE_DIR" "$tmpdir/etc/portage"
+rm -f "$tmpdir/etc/portage/sets/portageforge-binhost-packages"
+copy_if_present /etc/env.d "$tmpdir/etc/env.d"
+copy_if_present /etc/eselect "$tmpdir/etc/eselect"
+copy_if_present /etc/python-exec "$tmpdir/etc/python-exec"
+copy_if_present /etc/java-config-2 "$tmpdir/etc/java-config-2"
+copy_if_present /etc/locale.gen "$tmpdir/etc/locale.gen"
+copy_if_present /usr/src/linux "$tmpdir/usr/src/linux"
+binhost_package_atoms >"$packages_file"
+if [[ ! -s "$packages_file" ]]; then
+  printf '[export-target] error: no binhost package atoms found in %s\n' "$PACKAGE_DB" >&2
+  exit 1
+fi
+
+printf '%s\n' "$target_hostname" >"$tmpdir/metadata/hostname"
+printf '%s\n' "$profile" >"$tmpdir/metadata/profile"
+date -u '+%Y-%m-%dT%H:%M:%SZ' >"$tmpdir/metadata/exported-at"
+
+tar -C "$tmpdir" -cf "$out_file" .
+
+printf '[export-target] wrote %s\n' "$out_file" >&2
+printf '[export-target] wrote %s\n' "$packages_file" >&2
+printf '[export-target] captured %s binhost package atom(s)\n' "$(wc -l <"$packages_file")" >&2

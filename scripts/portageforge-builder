@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BUILD_INTERVAL_SECONDS=86400
+TARGETS_SHARE_TAG=portageforge-targets
+TARGETS_MOUNT=/mnt/portageforge-targets
+TARGET_ROOT=/var/lib/portageforge/target
+DATA_SHARE_TAG=portageforge-data
+DATA_ROOT=/mnt/portageforge-data
+TARGET_DATA_ROOT="$DATA_ROOT/targets"
+PORTAGE_TMPDIR_ROOT=/var/tmp/portageforge/targets
+BINHOST_PORT=8080
+CPU_COUNT=$(nproc 2>/dev/null || printf '1')
+HTTP_PID=
+TARGET_NAME=
+PKGDIR_PATH=
+DISTDIR_PATH=
+PORTAGE_TMPDIR_PATH=
+if [[ "$CPU_COUNT" -gt 1 ]]; then
+  BUILD_JOBS=$((CPU_COUNT - 1))
+else
+  BUILD_JOBS=1
+fi
+
+# Stop the HTTP server when the build service exits.
+cleanup() {
+  if [[ -n "$HTTP_PID" ]]; then
+    kill "$HTTP_PID" 2>/dev/null || true
+  fi
+}
+
+# Print all target snapshot tar files available inside the Gentoo VM.
+list_target_archives() {
+  if [[ ! -d "$TARGETS_MOUNT" ]]; then
+    printf '[portageforge] error: target snapshot directory not found: %s\n' "$TARGETS_MOUNT" >&2
+    exit 1
+  fi
+
+  find "$TARGETS_MOUNT" -maxdepth 1 -type f -name '*.tar' | sort
+}
+
+# Mount the target-input directory shared by QEMU.
+prepare_targets_share() {
+  mkdir -p "$TARGETS_MOUNT"
+  if ! mountpoint -q "$TARGETS_MOUNT"; then
+    if ! mount -t 9p -o trans=virtio,version=9p2000.L,ro "$TARGETS_SHARE_TAG" "$TARGETS_MOUNT"; then
+      printf '[portageforge] error: could not mount targets share tag %s at %s\n' "$TARGETS_SHARE_TAG" "$TARGETS_MOUNT" >&2
+      exit 1
+    fi
+  fi
+
+  if [[ ! -d "$TARGETS_MOUNT" ]]; then
+    printf '[portageforge] error: shared targets directory not found: %s\n' "$TARGETS_MOUNT" >&2
+    exit 1
+  fi
+}
+
+# Mount the writable host directory used for durable Portage artifacts.
+prepare_data_share() {
+  mkdir -p "$DATA_ROOT"
+  if ! mountpoint -q "$DATA_ROOT"; then
+    if ! mount -t 9p -o trans=virtio,version=9p2000.L "$DATA_SHARE_TAG" "$DATA_ROOT"; then
+      printf '[portageforge] error: could not mount data share tag %s at %s\n' "$DATA_SHARE_TAG" "$DATA_ROOT" >&2
+      exit 1
+    fi
+  fi
+
+  mkdir -p "$TARGET_DATA_ROOT" "$PORTAGE_TMPDIR_ROOT"
+}
+
+# Keep target names usable as URL path segments and local directory names.
+sanitize_target_name() {
+  local name=$1
+
+  name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '-')
+  name=${name##-}
+  name=${name%%-}
+  printf '%s' "${name:-target}"
+}
+
+# Turn the target snapshot tar into the live Portage state used by the VM.
+prepare_builder_from_snapshot() {
+  local archive=$1
+  local archive_name
+  local hostname=
+  local package_list
+  local profile
+
+  rm -rf "$TARGET_ROOT"
+  mkdir -p "$TARGET_ROOT"
+
+  printf '[portageforge] loading target snapshot %s\n' "$archive"
+  tar -C "$TARGET_ROOT" -xf "$archive"
+
+  if [[ -s "$TARGET_ROOT/metadata/hostname" ]]; then
+    hostname=$(awk 'NF { print; exit }' "$TARGET_ROOT/metadata/hostname")
+    if [[ -n "$hostname" ]]; then
+      printf '[portageforge] target hostname: %s\n' "$hostname"
+    fi
+  fi
+  archive_name=$(basename "$archive" .tar)
+  if [[ -z "$hostname" ]]; then
+    hostname=$archive_name
+  fi
+  TARGET_NAME=$(sanitize_target_name "$hostname")
+  package_list="$TARGETS_MOUNT/${archive_name}.packages"
+  PKGDIR_PATH="$TARGET_DATA_ROOT/$TARGET_NAME/binpkgs"
+  DISTDIR_PATH="$TARGET_DATA_ROOT/$TARGET_NAME/distfiles"
+  PORTAGE_TMPDIR_PATH="$PORTAGE_TMPDIR_ROOT/$TARGET_NAME"
+  mkdir -p "$PKGDIR_PATH" "$DISTDIR_PATH" "$PORTAGE_TMPDIR_PATH"
+
+  if [[ ! -s "$package_list" ]]; then
+    printf '[portageforge] error: target package list not found or empty: %s\n' "$package_list" >&2
+    exit 1
+  fi
+
+  if [[ ! -s "$TARGET_ROOT/metadata/profile" ]]; then
+    printf '[portageforge] error: target snapshot is missing metadata/profile\n' >&2
+    exit 1
+  fi
+  profile=$(awk 'NF { print; exit }' "$TARGET_ROOT/metadata/profile")
+  if [[ -z "$profile" ]]; then
+    printf '[portageforge] error: target snapshot metadata/profile is empty\n' >&2
+    exit 1
+  fi
+
+  if [[ ! -d "$TARGET_ROOT/etc/portage" ]]; then
+    printf '[portageforge] error: target snapshot is missing etc/portage\n' >&2
+    exit 1
+  fi
+  if [[ ! -s "$TARGET_ROOT/etc/portage/make.conf" ]]; then
+    printf '[portageforge] error: target snapshot is missing etc/portage/make.conf\n' >&2
+    exit 1
+  fi
+
+  printf '[portageforge] applying target /etc/portage snapshot\n'
+  rm -rf /etc/portage
+  mkdir -p /etc
+  cp -a "$TARGET_ROOT/etc/portage" /etc/portage
+  rm -rf /etc/portage/make.profile
+  mkdir -p /etc/portage/sets
+  awk 'NF && $1 !~ /^#/ { print }' "$package_list" | sort -u >/etc/portage/sets/portageforge-binhost-packages
+  if [[ ! -s /etc/portage/sets/portageforge-binhost-packages ]]; then
+    printf '[portageforge] error: target package list has no package atoms: %s\n' "$package_list" >&2
+    exit 1
+  fi
+
+  {
+    cat "$TARGET_ROOT/etc/portage/make.conf"
+    printf '\n# BEGIN portageforge-builder\n'
+    printf 'FEATURES="${FEATURES} buildpkg binpkg-multi-instance"\n'
+    printf 'PKGDIR="%s"\n' "$PKGDIR_PATH"
+    printf 'DISTDIR="%s"\n' "$DISTDIR_PATH"
+    printf 'PORTAGE_TMPDIR="%s"\n' "$PORTAGE_TMPDIR_PATH"
+    printf 'BINPKG_FORMAT="gpkg"\n'
+    printf 'MAKEOPTS="-j%s"\n' "$BUILD_JOBS"
+    printf '# END portageforge-builder\n'
+  } >/etc/portage/make.conf
+
+  printf '[portageforge] target binhost path: /targets/%s/binpkgs/\n' "$TARGET_NAME"
+  printf '[portageforge] using %s build job(s)\n' "$BUILD_JOBS"
+  printf '[portageforge] loaded %s binhost package atom(s)\n' "$(wc -l </etc/portage/sets/portageforge-binhost-packages)"
+  load_requested_packages
+}
+
+# Load shared build requests that are not yet in the exported binhost package set.
+load_requested_packages() {
+  local request_set=/etc/portage/sets/portageforge-requested
+  local request_file="$TARGETS_MOUNT/requested-packages"
+
+  mkdir -p /etc/portage/sets
+  rm -f "$request_set"
+
+  if [[ -s "$request_file" ]]; then
+    awk 'NF && $1 !~ /^#/ { print }' "$request_file" | sort -u >"$request_set"
+    if [[ -s "$request_set" ]]; then
+      printf '[portageforge] loaded %s requested package atom(s)\n' "$(wc -l <"$request_set")"
+    else
+      rm -f "$request_set"
+    fi
+  fi
+}
+
+# Copy one optional target snapshot path into the VM root filesystem.
+restore_snapshot_path() {
+  local relative_path=$1
+  local source="$TARGET_ROOT/$relative_path"
+  local destination="/$relative_path"
+
+  if [[ -e "$source" || -L "$source" ]]; then
+    mkdir -p "$(dirname "$destination")"
+    rm -rf "$destination"
+    cp -a "$source" "$destination"
+  fi
+}
+
+# Restore generic target selection state that affects which installed tools run.
+restore_target_environment_state() {
+  local snapshot_path
+
+  for snapshot_path in \
+    etc/env.d \
+    etc/eselect \
+    etc/python-exec \
+    etc/java-config-2 \
+    etc/locale.gen \
+    usr/src/linux; do
+    restore_snapshot_path "$snapshot_path"
+  done
+
+  if [[ -e /etc/locale.gen ]] && command -v locale-gen >/dev/null 2>&1; then
+    locale-gen
+  fi
+
+  if command -v env-update >/dev/null 2>&1; then
+    env-update
+  fi
+}
+
+# Build current source packages from the binhost package and request sets.
+emerge_target_packages() {
+  local emerge_args=(
+    --usepkg=n
+    --getbinpkg=n
+    --with-bdeps=y
+    --buildpkg=y
+    --jobs="$BUILD_JOBS"
+  )
+  local targets=(@portageforge-binhost-packages)
+
+  restore_target_environment_state
+  if [[ -s /etc/portage/sets/portageforge-requested ]]; then
+    targets+=(@portageforge-requested)
+  fi
+
+  if [[ -n "$(find "$PKGDIR_PATH" -type f ! -name Packages -print -quit 2>/dev/null)" ]]; then
+    printf '[portageforge] building current binhost package updates\n'
+    emerge_args+=(--update --deep --newuse)
+  else
+    printf '[portageforge] binpkg cache is empty; building full binhost package set\n'
+    emerge_args+=(--emptytree)
+  fi
+
+  emerge "${emerge_args[@]}" "${targets[@]}"
+}
+
+# Serve the data directory over HTTP so each target gets its own binhost URL.
+start_binhost_server() {
+  if [[ -n "$HTTP_PID" ]] && kill -0 "$HTTP_PID" 2>/dev/null; then
+    return
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '[portageforge] error: python3 is required to serve the binhost\n' >&2
+    exit 1
+  fi
+
+  mkdir -p "$TARGET_DATA_ROOT"
+  python3 -m http.server "$BINHOST_PORT" --bind 0.0.0.0 --directory "$DATA_ROOT" &
+  HTTP_PID=$!
+  trap cleanup EXIT
+  trap 'cleanup; exit 0' INT TERM
+  sleep 1
+  if ! kill -0 "$HTTP_PID" 2>/dev/null; then
+    printf '[portageforge] error: binhost HTTP server failed to start\n' >&2
+    exit 1
+  fi
+  printf '[portageforge] serving binhosts at http://0.0.0.0:%s/targets/<target>/binpkgs/\n' "$BINHOST_PORT"
+}
+
+# Build one target snapshot and refresh that target's binhost index.
+build_target() {
+  local archive=$1
+  local profile
+
+  prepare_builder_from_snapshot "$archive"
+  profile=$(awk 'NF { print; exit }' "$TARGET_ROOT/metadata/profile")
+
+  printf '[portageforge] setting Gentoo profile to %s\n' "$profile"
+  eselect profile set "$profile"
+
+  emerge_target_packages
+
+  printf '[portageforge] refreshing binhost package index\n'
+  emaint binhost --fix
+}
+
+# Run one daily sync, then build every target snapshot in sorted order.
+build_cycle() {
+  local archive
+  local archives=()
+
+  mapfile -t archives < <(list_target_archives)
+  if [[ "${#archives[@]}" -eq 0 ]]; then
+    printf '[portageforge] error: no target snapshot tar found in %s\n' "$TARGETS_MOUNT" >&2
+    exit 1
+  fi
+  printf '[portageforge] found %s target snapshot(s)\n' "${#archives[@]}"
+
+  printf '[portageforge] syncing Gentoo repositories\n'
+  emerge --sync
+
+  for archive in "${archives[@]}"; do
+    printf '[portageforge] starting target snapshot %s\n' "$archive"
+    build_target "$archive"
+  done
+}
+
+prepare_targets_share
+prepare_data_share
+start_binhost_server
+while true; do
+  build_cycle
+  printf '[portageforge] sleeping %ss before next sync/build\n' "$BUILD_INTERVAL_SECONDS"
+  sleep "$BUILD_INTERVAL_SECONDS"
+done

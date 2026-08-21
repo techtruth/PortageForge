@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
+IMAGES_DIR="$REPO_ROOT/images"
+VM_DIR="$REPO_ROOT/vm"
+TARGETS_DIR="$VM_DIR/targets"
+DATA_DIR="$VM_DIR/data"
+DISK_IMAGE="$IMAGES_DIR/portageforge.qcow2"
+SEED_ISO="$IMAGES_DIR/seed.iso"
+MEMORY_MB=8192
+CPU_MODEL=max
+SSH_PORT=2222
+BINHOST_PORT=8080
+OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
+CPU_COUNT=$(nproc 2>/dev/null || printf '1')
+if [[ "$CPU_COUNT" -gt 1 ]]; then
+  VCPUS=$((CPU_COUNT - 1))
+else
+  VCPUS=1
+fi
+
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+  printf '[run-portageforge-builder] error: qemu-system-x86_64 not found; install QEMU with your host OS package manager\n' >&2
+  exit 1
+fi
+
+mkdir -p "$TARGETS_DIR" "$DATA_DIR/targets"
+
+if [[ ! -f "$OVMF_CODE" ]]; then
+  printf '[run-portageforge-builder] error: OVMF firmware not found: %s\n' "$OVMF_CODE" >&2
+  printf '[run-portageforge-builder] install OVMF/edk2 firmware or set OVMF_CODE=/path/to/OVMF_CODE.fd\n' >&2
+  exit 1
+fi
+
+if [[ ! -f "$DISK_IMAGE" ]]; then
+  printf '[run-portageforge-builder] error: missing disk image: %s\n' "$DISK_IMAGE" >&2
+  printf '[run-portageforge-builder] create it with: make setup\n' >&2
+  exit 1
+fi
+
+if [[ ! -f "$SEED_ISO" ]]; then
+  printf '[run-portageforge-builder] error: missing cloud-init seed: %s\n' "$SEED_ISO" >&2
+  printf '[run-portageforge-builder] create it with: make setup\n' >&2
+  exit 1
+fi
+
+qemu_args=(
+  qemu-system-x86_64
+  -name portageforge-builder
+  -machine q35
+  -accel tcg,thread=multi
+  -cpu "$CPU_MODEL"
+  -smp "$VCPUS"
+  -m "$MEMORY_MB"
+  -smbios type=0,uefi=on
+  -drive "if=pflash,unit=0,readonly=on,file=$OVMF_CODE"
+  -drive "file=$DISK_IMAGE,if=virtio,format=qcow2"
+  -virtfs "local,path=$TARGETS_DIR,mount_tag=portageforge-targets,security_model=none,readonly=on"
+  -virtfs "local,path=$DATA_DIR,mount_tag=portageforge-data,security_model=none"
+  -device virtio-net-pci,netdev=net0
+  -netdev "user,id=net0,hostfwd=tcp::${SSH_PORT}-:22,hostfwd=tcp::${BINHOST_PORT}-:8080"
+  -serial mon:stdio
+  -display none
+  -drive "file=$SEED_ISO,if=ide,media=cdrom,readonly=on"
+)
+
+exec "${qemu_args[@]}"

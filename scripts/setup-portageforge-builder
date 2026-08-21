@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+IMAGES_DIR=images
+VM_DIR=vm
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
+GENTOO_IMAGE_DIR=current-di-amd64-cloudinit
+BASE_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/${GENTOO_IMAGE_DIR}"
+LATEST_FILE=latest-di-amd64-cloudinit.txt
+BOOT_IMAGE="$IMAGES_DIR/portageforge.qcow2"
+BOOT_IMAGE_SIZE=300G
+TARGETS_DIR="$VM_DIR/targets"
+DATA_DIR="$VM_DIR/data"
+SEED_DIR="$IMAGES_DIR/cloud-init"
+SEED_ISO="$IMAGES_DIR/seed.iso"
+PUBLIC_KEY=${1:-}
+VM_BUILDER_SCRIPT="$REPO_ROOT/scripts/portageforge-builder"
+
+require_command() {
+  local command_name=$1
+
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    printf '[setup-portageforge-builder] error: required command not found: %s\n' "$command_name" >&2
+    exit 1
+  fi
+}
+
+find_public_key() {
+  if [[ -n "$PUBLIC_KEY" ]]; then
+    printf '%s\n' "$PUBLIC_KEY"
+  elif [[ -f "$HOME/.ssh/id_ed25519.pub" ]]; then
+    printf '%s\n' "$HOME/.ssh/id_ed25519.pub"
+  elif [[ -f "$HOME/.ssh/id_rsa.pub" ]]; then
+    printf '%s\n' "$HOME/.ssh/id_rsa.pub"
+  else
+    printf '[setup-portageforge-builder] error: pass an SSH public key path, or create ~/.ssh/id_ed25519.pub\n' >&2
+    exit 1
+  fi
+}
+
+fetch_boot_image() {
+  local image_name
+  local expected_hash
+  local actual_hash
+
+  if [[ -e "$BOOT_IMAGE" ]]; then
+    printf '[setup-portageforge-builder] using existing boot disk %s\n' "$BOOT_IMAGE"
+    return
+  fi
+
+  curl -fL -o "$IMAGES_DIR/$LATEST_FILE" "$BASE_URL/$LATEST_FILE"
+  image_name=$(awk '/^[^#-].*\.qcow2[[:space:]]+[0-9]+/ { print $1; exit }' "$IMAGES_DIR/$LATEST_FILE")
+  if [[ -z "$image_name" ]]; then
+    printf '[setup-portageforge-builder] error: could not find qcow2 filename in %s\n' "$IMAGES_DIR/$LATEST_FILE" >&2
+    exit 1
+  fi
+
+  curl -fL -o "$IMAGES_DIR/$image_name" "$BASE_URL/$image_name"
+  curl -fL -o "$IMAGES_DIR/$image_name.sha256" "$BASE_URL/$image_name.sha256"
+
+  expected_hash=$(awk -v file="$image_name" '
+    $0 ~ file {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^[0-9a-fA-F]{64}$/) {
+          print tolower($i)
+          exit
+        }
+      }
+    }
+  ' "$IMAGES_DIR/$image_name.sha256")
+  if [[ -z "$expected_hash" ]]; then
+    printf '[setup-portageforge-builder] error: could not parse SHA256 from %s\n' "$IMAGES_DIR/$image_name.sha256" >&2
+    exit 1
+  fi
+  actual_hash=$(sha256sum "$IMAGES_DIR/$image_name" | awk '{ print $1 }')
+  if [[ "$actual_hash" != "$expected_hash" ]]; then
+    printf '[setup-portageforge-builder] error: SHA256 mismatch for %s\n' "$image_name" >&2
+    exit 1
+  fi
+  printf '[setup-portageforge-builder] verified SHA256 for %s\n' "$image_name"
+
+  qemu-img convert -O qcow2 "$IMAGES_DIR/$image_name" "$BOOT_IMAGE"
+  qemu-img resize "$BOOT_IMAGE" "$BOOT_IMAGE_SIZE"
+  printf '[setup-portageforge-builder] created boot disk %s (%s)\n' "$BOOT_IMAGE" "$BOOT_IMAGE_SIZE"
+}
+
+create_seed_iso() {
+  local public_key=$1
+  local builder_script_b64
+  local ssh_key
+  local instance_id
+
+  if [[ ! -f "$public_key" ]]; then
+    printf '[setup-portageforge-builder] error: SSH public key not found: %s\n' "$public_key" >&2
+    exit 1
+  fi
+
+  if [[ ! -x "$VM_BUILDER_SCRIPT" ]]; then
+    printf '[setup-portageforge-builder] error: builder script is missing or not executable: %s\n' "$VM_BUILDER_SCRIPT" >&2
+    exit 1
+  fi
+
+  mkdir -p "$SEED_DIR"
+
+  ssh_key=$(<"$public_key")
+  builder_script_b64=$(base64 "$VM_BUILDER_SCRIPT")
+  instance_id="portageforge-$(date +%s)"
+
+  cat >"$SEED_DIR/meta-data" <<EOF
+instance-id: $instance_id
+local-hostname: portageforge
+EOF
+
+  cat >"$SEED_DIR/user-data" <<EOF
+#cloud-config
+disable_root: false
+ssh_pwauth: false
+growpart:
+  mode: auto
+  devices: ['/']
+resize_rootfs: true
+users:
+  - name: root
+    lock_passwd: true
+    ssh_authorized_keys:
+      - $ssh_key
+write_files:
+  - path: /etc/ssh/sshd_config.d/portageforge.conf
+    permissions: '0644'
+    content: |
+      PermitRootLogin prohibit-password
+      PubkeyAuthentication yes
+  - path: /usr/local/sbin/portageforge-builder
+    permissions: '0755'
+    encoding: b64
+    content: |
+EOF
+  printf '%s\n' "$builder_script_b64" | sed 's/^/      /' >>"$SEED_DIR/user-data"
+
+  cat >>"$SEED_DIR/user-data" <<EOF
+  - path: /etc/init.d/portageforge-builder
+    permissions: '0755'
+    content: |
+      #!/sbin/openrc-run
+
+      name="PortageForge builder"
+      description="Build and serve target-optimized Gentoo binary packages"
+      command="/usr/local/sbin/portageforge-builder"
+      command_background="yes"
+      pidfile="/run/portageforge-builder.pid"
+      output_log="/var/log/portageforge-builder.log"
+      error_log="/var/log/portageforge-builder.log"
+
+      depend() {
+        need net
+        after sshd
+      }
+
+      start_pre() {
+        mkdir -p /var/tmp/portageforge
+        if [ ! -x /usr/local/sbin/portageforge-builder ]; then
+          eerror "builder script is not executable: /usr/local/sbin/portageforge-builder"
+          return 1
+        fi
+      }
+runcmd:
+  - rc-update add sshd default
+  - rc-service sshd restart
+  - rc-update add portageforge-builder default
+  - sh -c 'rc-service portageforge-builder restart || rc-service portageforge-builder start'
+EOF
+
+  genisoimage -quiet -output "$SEED_ISO" -volid cidata -joliet -rock "$SEED_DIR/user-data" "$SEED_DIR/meta-data"
+  printf '[setup-portageforge-builder] created %s using %s\n' "$SEED_ISO" "$public_key"
+}
+
+cd "$REPO_ROOT"
+
+require_command base64
+require_command curl
+require_command genisoimage
+require_command qemu-img
+require_command sha256sum
+
+mkdir -p "$IMAGES_DIR" "$TARGETS_DIR" "$DATA_DIR/targets"
+printf '[setup-portageforge-builder] prepared %s and %s\n' "$IMAGES_DIR" "$VM_DIR"
+public_key=$(find_public_key)
+fetch_boot_image
+create_seed_iso "$public_key"
+
+printf '[setup-portageforge-builder] setup complete\n'
+printf '[setup-portageforge-builder] start the VM with: make run\n'
