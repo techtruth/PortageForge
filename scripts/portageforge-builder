@@ -453,6 +453,7 @@ restore_target_environment_state() {
     etc/eselect \
     etc/python-exec \
     etc/java-config-2 \
+    etc/locale.conf \
     etc/locale.gen \
     usr/src/linux; do
     restore_snapshot_path "$snapshot_path"
@@ -465,7 +466,24 @@ restore_target_environment_state() {
   if [[ -e "$TARGET_CHROOT_PATH/etc/locale.gen" ]] && [[ -x "$TARGET_CHROOT_PATH/usr/sbin/locale-gen" ]]; then
     chroot_run locale-gen
   fi
+  if [[ -x "$TARGET_CHROOT_PATH/usr/sbin/env-update" ]]; then
+    chroot_run env-update
+  fi
+}
 
+# Return success when the target profile exists in the chroot's synced tree.
+target_profile_exists() {
+  local profile=$1
+
+  [[ -d "$TARGET_CHROOT_PATH/var/db/repos/gentoo/profiles/$profile" ]]
+}
+
+# Select the target profile and refresh the chroot environment.
+set_target_profile() {
+  local profile=$1
+
+  printf '[portageforge] setting Gentoo profile to %s\n' "$profile"
+  chroot_run eselect profile set "$profile"
   if [[ -x "$TARGET_CHROOT_PATH/usr/sbin/env-update" ]]; then
     chroot_run env-update
   fi
@@ -486,7 +504,6 @@ emerge_target_packages() {
   local private_buildpkg_excludes_file="$PORTAGE_TMPDIR_PATH/private-buildpkg-excludes"
   local targets=(@portageforge-binhost-packages)
 
-  restore_target_environment_state
   install_private_build_dependencies "$private_buildpkg_excludes_file" "${targets[@]}"
   if [[ -s "$private_buildpkg_excludes_file" ]]; then
     buildpkg_exclude=$(paste -sd ' ' "$private_buildpkg_excludes_file")
@@ -537,16 +554,27 @@ build_target() {
   prepare_builder_from_snapshot "$archive"
   profile=$(awk 'NF { print; exit }' "$TARGET_ROOT/metadata/profile")
   mount_target_chroot
+  restore_target_environment_state
 
-  printf '[portageforge] syncing target repositories for %s\n' "$TARGET_NAME"
-  if ! chroot_emerge --sync; then
+  if target_profile_exists "$profile"; then
+    if ! set_target_profile "$profile"; then
+      printf '[portageforge] error: profile selection failed for %s\n' "$TARGET_NAME" >&2
+      result=1
+    fi
+  else
+    printf '[portageforge] target profile will be selected after repository sync: %s\n' "$profile"
+  fi
+
+  if [[ "$result" -eq 0 ]]; then
+    printf '[portageforge] syncing target repositories for %s\n' "$TARGET_NAME"
+  fi
+  if [[ "$result" -eq 0 ]] && ! chroot_emerge --sync; then
     printf '[portageforge] error: repository sync failed for %s\n' "$TARGET_NAME" >&2
     result=1
   fi
 
   if [[ "$result" -eq 0 ]]; then
-    printf '[portageforge] setting Gentoo profile to %s\n' "$profile"
-    if ! chroot_run eselect profile set "$profile"; then
+    if ! set_target_profile "$profile"; then
       printf '[portageforge] error: profile selection failed for %s\n' "$TARGET_NAME" >&2
       result=1
     fi

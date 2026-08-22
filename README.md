@@ -60,6 +60,7 @@ metadata/exported-at
 etc/env.d/                      # when present
 etc/eselect/                    # when present
 etc/java-config-2/              # when present
+etc/locale.conf                 # when present
 etc/locale.gen                  # when present
 etc/python-exec/                # when present
 etc/portage/
@@ -250,8 +251,11 @@ for each /mnt/portageforge-targets/*.tar:
   load /mnt/portageforge-targets/<target-hostname>.packages
   restore target /etc/portage policy into the chroot
   mount proc/sys/dev/run plus binpkgs/distfiles/temp into the chroot
+  restore target env/eselect/python/java/locale state into the chroot
+  run locale-gen/env-update from restored target config
+  set the target Gentoo profile before sync when the repo tree already exists
   run emerge --sync inside the chroot
-  set the target Gentoo profile inside the chroot
+  set the target Gentoo profile inside the chroot after sync
   install private build-time dependencies inside the chroot
   build binary packages for @portageforge-binhost-packages inside the chroot
   run emaint binhost --fix inside the chroot
@@ -304,6 +308,10 @@ Each target chroot and its target machine should sync against compatible Gentoo
 repository state. This version assumes normal `emerge --sync` behavior on both
 sides. If exact repository matching becomes necessary, the VM can grow a
 repository snapshot service later.
+
+PortageForge does not create a `::gentoo` repository config. It restores the
+target's Portage config and otherwise relies on Portage's normal default
+repository configuration from `/usr/share/portage/config/repos.conf`.
 
 QEMU TCG is slow. It is the correctness path when the physical build host cannot
 execute the target CPU instructions, but a real target-compatible build machine
