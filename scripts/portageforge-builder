@@ -13,6 +13,7 @@ TARGET_CHROOT_ROOT=/var/lib/portageforge/targets
 STAGE3_TMPDIR=/var/tmp/portageforge/stage3
 PORTAGE_TMPDIR_ROOT=/var/tmp/portageforge/targets
 TARGET_PACKAGE_SET=/etc/portage/sets/portageforge-binhost-packages
+BOOTSTRAP_PACKAGE_USE=/etc/portage/package.use/99-portageforge-bootstrap
 CHROOT_PKGDIR=/portageforge/binpkgs
 CHROOT_DISTDIR=/portageforge/distfiles
 CHROOT_PORTAGE_TMPDIR=/var/tmp/portageforge
@@ -21,6 +22,7 @@ CPU_COUNT=$(nproc 2>/dev/null || printf '1')
 HTTP_PID=
 TARGET_NAME=
 TARGET_CHROOT_PATH=
+TARGET_PACKAGE_LIST=
 PKGDIR_PATH=
 DISTDIR_PATH=
 PORTAGE_TMPDIR_PATH=
@@ -283,12 +285,79 @@ chroot_emerge() {
   chroot_run emerge "$@"
 }
 
+# Print the Portage settings that make the chroot emit PortageForge binpkgs.
+builder_make_conf_settings() {
+  printf '\n# BEGIN portageforge-builder\n'
+  printf 'FEATURES="${FEATURES} buildpkg binpkg-multi-instance"\n'
+  printf 'PKGDIR="%s"\n' "$CHROOT_PKGDIR"
+  printf 'DISTDIR="%s"\n' "$CHROOT_DISTDIR"
+  printf 'PORTAGE_TMPDIR="%s"\n' "$CHROOT_PORTAGE_TMPDIR"
+  printf 'BINPKG_FORMAT="gpkg"\n'
+  printf 'MAKEOPTS="-j%s"\n' "$BUILD_JOBS"
+  printf '# END portageforge-builder\n'
+}
+
+# Write target make.conf plus PortageForge artifact settings.
+write_target_make_conf() {
+  {
+    cat "$TARGET_ROOT/etc/portage/make.conf"
+    builder_make_conf_settings
+  } >"$TARGET_CHROOT_PATH/etc/portage/make.conf"
+}
+
+# Write target make.conf without target USE= overrides for the first bootstrap.
+write_default_use_make_conf() {
+  {
+    awk '
+      /^[[:space:]]*(export[[:space:]]+)?USE[[:space:]]*=/ { next }
+      { print }
+    ' "$TARGET_ROOT/etc/portage/make.conf"
+    builder_make_conf_settings
+  } >"$TARGET_CHROOT_PATH/etc/portage/make.conf"
+}
+
+# Copy the exported target Portage tree into the chroot and refresh the set.
+copy_target_portage_snapshot() {
+  rm -rf "$TARGET_CHROOT_PATH/etc/portage"
+  mkdir -p "$TARGET_CHROOT_PATH/etc"
+  cp -a "$TARGET_ROOT/etc/portage" "$TARGET_CHROOT_PATH/etc/portage"
+  mkdir -p "$TARGET_CHROOT_PATH/etc/portage/sets"
+  load_target_package_set "$TARGET_PACKAGE_LIST"
+  if [[ ! -s "$TARGET_CHROOT_PATH$TARGET_PACKAGE_SET" ]]; then
+    printf '[portageforge] error: target package list has no package entries: %s\n' "$TARGET_PACKAGE_LIST" >&2
+    exit 1
+  fi
+}
+
+# Restore the target's real Portage policy into the chroot.
+apply_target_portage_config() {
+  printf '[portageforge] applying target /etc/portage snapshot to chroot\n'
+  copy_target_portage_snapshot
+  write_target_make_conf
+}
+
+# Apply target policy with target USE overrides disabled for stable bootstrapping.
+apply_default_use_bootstrap_config() {
+  printf '[portageforge] applying default-USE bootstrap Portage config\n'
+  copy_target_portage_snapshot
+  rm -rf \
+    "$TARGET_CHROOT_PATH/etc/portage/package.use" \
+    "$TARGET_CHROOT_PATH/etc/portage/package.env"
+  write_default_use_make_conf
+}
+
+# Refresh the chroot environment after changing profile or Portage config.
+refresh_chroot_environment() {
+  if [[ -x "$TARGET_CHROOT_PATH/usr/sbin/env-update" ]]; then
+    chroot_run env-update
+  fi
+}
+
 # Turn the target snapshot tar into the persistent chroot state used by Portage.
 prepare_builder_from_snapshot() {
   local archive=$1
   local archive_name
   local hostname=
-  local package_list
   local profile
 
   rm -rf "$TARGET_ROOT"
@@ -308,20 +377,20 @@ prepare_builder_from_snapshot() {
     hostname=$archive_name
   fi
   TARGET_NAME=$(sanitize_target_name "$hostname")
-  package_list="$TARGETS_MOUNT/${archive_name}.packages"
+  TARGET_PACKAGE_LIST="$TARGETS_MOUNT/${archive_name}.packages"
   PKGDIR_PATH="$TARGET_DATA_ROOT/$TARGET_NAME/binpkgs"
   DISTDIR_PATH="$TARGET_DATA_ROOT/$TARGET_NAME/distfiles"
   TARGET_CHROOT_PATH="$TARGET_CHROOT_ROOT/$TARGET_NAME/root"
   PORTAGE_TMPDIR_PATH="$PORTAGE_TMPDIR_ROOT/$TARGET_NAME"
   mkdir -p "$PKGDIR_PATH" "$DISTDIR_PATH" "$PORTAGE_TMPDIR_PATH" "$(dirname "$TARGET_CHROOT_PATH")"
 
-  if [[ -d "$package_list" ]]; then
-    printf '[portageforge] error: target package path must be a repo-qualified package file, not a directory: %s\n' "$package_list" >&2
-    printf '[portageforge] error: re-run make export-target-state on the target to create a single %s file\n' "$package_list" >&2
+  if [[ -d "$TARGET_PACKAGE_LIST" ]]; then
+    printf '[portageforge] error: target package path must be a repo-qualified package file, not a directory: %s\n' "$TARGET_PACKAGE_LIST" >&2
+    printf '[portageforge] error: re-run make export-target-state on the target to create a single %s file\n' "$TARGET_PACKAGE_LIST" >&2
     exit 1
   fi
-  if [[ ! -s "$package_list" ]]; then
-    printf '[portageforge] error: target package list not found or empty: %s\n' "$package_list" >&2
+  if [[ ! -s "$TARGET_PACKAGE_LIST" ]]; then
+    printf '[portageforge] error: target package list not found or empty: %s\n' "$TARGET_PACKAGE_LIST" >&2
     exit 1
   fi
 
@@ -345,29 +414,7 @@ prepare_builder_from_snapshot() {
   fi
 
   ensure_target_chroot "$profile"
-
-  printf '[portageforge] applying target /etc/portage snapshot to chroot\n'
-  rm -rf "$TARGET_CHROOT_PATH/etc/portage"
-  mkdir -p "$TARGET_CHROOT_PATH/etc"
-  cp -a "$TARGET_ROOT/etc/portage" "$TARGET_CHROOT_PATH/etc/portage"
-  mkdir -p "$TARGET_CHROOT_PATH/etc/portage/sets"
-  load_target_package_set "$package_list"
-  if [[ ! -s "$TARGET_CHROOT_PATH$TARGET_PACKAGE_SET" ]]; then
-    printf '[portageforge] error: target package list has no package entries: %s\n' "$package_list" >&2
-    exit 1
-  fi
-
-  {
-    cat "$TARGET_ROOT/etc/portage/make.conf"
-    printf '\n# BEGIN portageforge-builder\n'
-    printf 'FEATURES="${FEATURES} buildpkg binpkg-multi-instance"\n'
-    printf 'PKGDIR="%s"\n' "$CHROOT_PKGDIR"
-    printf 'DISTDIR="%s"\n' "$CHROOT_DISTDIR"
-    printf 'PORTAGE_TMPDIR="%s"\n' "$CHROOT_PORTAGE_TMPDIR"
-    printf 'BINPKG_FORMAT="gpkg"\n'
-    printf 'MAKEOPTS="-j%s"\n' "$BUILD_JOBS"
-    printf '# END portageforge-builder\n'
-  } >"$TARGET_CHROOT_PATH/etc/portage/make.conf"
+  apply_target_portage_config
 
   printf '[portageforge] target binhost path: /targets/%s/binpkgs/\n' "$TARGET_NAME"
   printf '[portageforge] using %s build job(s)\n' "$BUILD_JOBS"
@@ -403,6 +450,126 @@ installed_chroot_package_names() {
   done | sort -u
 }
 
+# Make an /etc/portage config path a directory while preserving target content.
+ensure_portage_config_directory() {
+  local config_name=$1
+  local config_path="$TARGET_CHROOT_PATH/etc/portage/$config_name"
+  local target_file
+
+  if [[ -d "$config_path" ]]; then
+    return
+  fi
+  if [[ -e "$config_path" || -L "$config_path" ]]; then
+    target_file="$TARGET_CHROOT_PATH/etc/portage/$config_name.target"
+    rm -rf "$target_file"
+    mv "$config_path" "$target_file"
+    mkdir -p "$config_path"
+    mv "$target_file" "$config_path/00-target"
+  else
+    mkdir -p "$config_path"
+  fi
+}
+
+# Remove temporary bootstrap USE changes before building final binpkgs.
+clear_bootstrap_use_suggestions() {
+  local use_file="$TARGET_CHROOT_PATH$BOOTSTRAP_PACKAGE_USE"
+
+  if [[ -d "$(dirname "$use_file")" ]]; then
+    rm -f "$use_file"
+  fi
+}
+
+# Print package.use lines from Portage circular-dependency "Change USE" hints.
+bootstrap_use_suggestions() {
+  local output_file=$1
+
+  awk '
+    /^- [^[:space:]]+ \(Change USE: / {
+      atom = $2
+      flags = $0
+      sub(/^.*\(Change USE: /, "", flags)
+      sub(/\).*$/, "", flags)
+      if (atom ~ /^[A-Za-z0-9+_.-]+\/[A-Za-z0-9+_.-]+-[0-9]/ && flags ~ /^[-+A-Za-z0-9_@[:space:]]+$/) {
+        print "=" atom " " flags
+      }
+    }
+  ' "$output_file" | sort -u
+}
+
+# Apply new temporary package.use suggestions from one emerge failure.
+apply_bootstrap_use_suggestions() {
+  local merged_file="$PORTAGE_TMPDIR_PATH/bootstrap-use-merged"
+  local output_file=$1
+  local suggestions_file="$PORTAGE_TMPDIR_PATH/bootstrap-use-suggestions"
+  local use_file="$TARGET_CHROOT_PATH$BOOTSTRAP_PACKAGE_USE"
+
+  bootstrap_use_suggestions "$output_file" >"$suggestions_file"
+  if [[ ! -s "$suggestions_file" ]]; then
+    return 1
+  fi
+
+  ensure_portage_config_directory package.use
+  touch "$use_file"
+  cat "$use_file" "$suggestions_file" | sort -u >"$merged_file"
+  if cmp -s "$merged_file" "$use_file"; then
+    return 1
+  fi
+  cp "$merged_file" "$use_file"
+  printf '[portageforge] applying temporary bootstrap USE change(s)\n'
+  sed 's/^/[portageforge] bootstrap USE: /' "$suggestions_file"
+}
+
+# Install build-time dependencies once under the current Portage config.
+emerge_private_build_dependencies() {
+  local update_mode=$1
+  shift
+  local emerge_args=(
+    --usepkg=n
+    --getbinpkg=n
+    --oneshot
+    --ignore-world=y
+    --onlydeps
+    --onlydeps-with-rdeps=n
+    --with-bdeps=y
+    --buildpkg=n
+    --jobs="$BUILD_JOBS"
+  )
+  local targets=("$@")
+
+  if [[ "$update_mode" == update ]]; then
+    emerge_args+=(--update --deep --newuse)
+  fi
+
+  chroot_emerge "${emerge_args[@]}" "${targets[@]}"
+}
+
+# Resolve private build-time dependencies with circular-dependency retries.
+resolve_private_build_dependencies() {
+  local attempt
+  local max_attempts=5
+  local output_file
+  local phase=$1
+  local update_mode=$2
+  local phase_slug
+  shift 2
+  local targets=("$@")
+  phase_slug=$(printf '%s' "$phase" | tr -c 'A-Za-z0-9._-' '-')
+  output_file="$PORTAGE_TMPDIR_PATH/private-build-dependencies-$phase_slug.log"
+
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    printf '[portageforge] resolving private chroot build-time dependencies (%s)\n' "$phase"
+    if emerge_private_build_dependencies "$update_mode" "${targets[@]}" 2>&1 | tee "$output_file"; then
+      break
+    fi
+    if [[ "$attempt" -lt "$max_attempts" ]] && apply_bootstrap_use_suggestions "$output_file"; then
+      printf '[portageforge] retrying private dependency resolution with temporary bootstrap USE changes\n'
+    else
+      printf '[portageforge] error: private chroot build-time dependency resolution failed during %s\n' "$phase" >&2
+      return 1
+    fi
+  done
+}
+
 # Install build-time dependencies that are private to the target chroot.
 install_private_build_dependencies() {
   local private_installed_packages=$1
@@ -412,18 +579,23 @@ install_private_build_dependencies() {
 
   mkdir -p "$PORTAGE_TMPDIR_PATH"
 
-  printf '[portageforge] resolving private chroot build-time dependencies\n'
-  chroot_emerge \
-    --usepkg=n \
-    --getbinpkg=n \
-    --oneshot \
-    --ignore-world=y \
-    --onlydeps \
-    --onlydeps-with-rdeps=n \
-    --with-bdeps=y \
-    --buildpkg=n \
-    --jobs="$BUILD_JOBS" \
-    "${targets[@]}"
+  clear_bootstrap_use_suggestions
+  apply_default_use_bootstrap_config
+  refresh_chroot_environment
+  if ! resolve_private_build_dependencies default-use-bootstrap missing "${targets[@]}"; then
+    return 1
+  fi
+
+  clear_bootstrap_use_suggestions
+  apply_target_portage_config
+  refresh_chroot_environment
+  if ! resolve_private_build_dependencies target-use-bootstrap update "${targets[@]}"; then
+    return 1
+  fi
+
+  clear_bootstrap_use_suggestions
+  apply_target_portage_config
+  refresh_chroot_environment
 
   target_package_names >"$target_package_names_file"
   installed_chroot_package_names | comm -23 - "$target_package_names_file" >"$private_installed_packages"
@@ -468,7 +640,7 @@ restore_target_environment_state() {
     chroot_run locale-gen
   fi
   if [[ -x "$TARGET_CHROOT_PATH/usr/sbin/env-update" ]]; then
-    chroot_run env-update
+    refresh_chroot_environment
   fi
 }
 
@@ -485,9 +657,7 @@ set_target_profile() {
 
   printf '[portageforge] setting Gentoo profile to %s\n' "$profile"
   chroot_run eselect profile set "$profile"
-  if [[ -x "$TARGET_CHROOT_PATH/usr/sbin/env-update" ]]; then
-    chroot_run env-update
-  fi
+  refresh_chroot_environment
 }
 
 # Build current source packages from the target package set.
@@ -498,14 +668,18 @@ emerge_target_packages() {
     --oneshot
     --ignore-world=y
     --with-bdeps=y
-    --buildpkgonly=y
+    --buildpkgonly
     --jobs="$BUILD_JOBS"
   )
   local buildpkg_exclude
   local private_buildpkg_excludes_file="$PORTAGE_TMPDIR_PATH/private-buildpkg-excludes"
   local targets=(@portageforge-binhost-packages)
 
-  install_private_build_dependencies "$private_buildpkg_excludes_file" "${targets[@]}"
+  if ! install_private_build_dependencies "$private_buildpkg_excludes_file" "${targets[@]}"; then
+    clear_bootstrap_use_suggestions
+    return 1
+  fi
+  clear_bootstrap_use_suggestions
   if [[ -s "$private_buildpkg_excludes_file" ]]; then
     buildpkg_exclude=$(paste -sd ' ' "$private_buildpkg_excludes_file")
     emerge_args+=("--buildpkg-exclude=$buildpkg_exclude")

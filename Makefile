@@ -5,7 +5,7 @@ ROOT_PASSWORD ?=
 export SSH_PUBLIC_KEY
 export ROOT_PASSWORD
 
-.PHONY: help setup run export-target-state check
+.PHONY: help setup run export-target-state check pristine
 
 help:
 	@printf '%s\n' 'PortageForge targets:'
@@ -15,6 +15,7 @@ help:
 	@printf '%s\n' '  make run                           Boot the QEMU builder VM'
 	@printf '%s\n' '  make export-target-state           Export target state on a Gentoo client'
 	@printf '%s\n' '  make check                         Syntax-check project shell scripts'
+	@printf '%s\n' '  make pristine                      Remove generated VM/build state'
 
 setup:
 	./scripts/setup-portageforge-builder
@@ -27,3 +28,7 @@ export-target-state:
 
 check:
 	bash -n ./scripts/setup-portageforge-builder ./scripts/run-portageforge-builder ./scripts/export-target-state ./scripts/portageforge-builder
+
+pristine:
+	rm -rf images
+	rm -rf vm/data/*

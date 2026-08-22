@@ -258,7 +258,8 @@ for each /mnt/portageforge-targets/*.tar:
   set the target Gentoo profile before sync when the repo tree already exists
   run emerge --sync inside the chroot
   set the target Gentoo profile inside the chroot after sync
-  install private build-time dependencies inside the chroot
+  install missing private build-time dependencies with target USE overrides disabled
+  restore target config and update private build-time dependencies with --newuse
   build binary packages for @portageforge-binhost-packages inside the chroot
   run emaint binhost --fix inside the chroot
   unmount the chroot runtime paths
@@ -276,11 +277,19 @@ or `amd64-nomultilib-systemd` from the exported profile name.
 
 Some source packages need bootstrap providers or other build-only tools before
 the source package can be built. PortageForge does not keep a hardcoded
-bootstrap package map. Instead, it asks Portage to install the build-time
-dependencies of the target package set inside the target chroot with runtime
-dependencies and binary package output disabled, then builds the target package
-set with `--buildpkgonly` so final target packages are emitted as binpkgs
-without being merged into the target chroot.
+bootstrap package map. Instead, it asks Portage to install private build-time
+dependencies in two passes before any served binpkgs are emitted. The first pass
+uses the target profile and package policy, but disables target `USE=`,
+`package.use`, and `package.env` overrides so a default-USE tool stack can break
+the worst bootstrap loops. The second pass restores the full target Portage
+config and runs with `--newuse`, so private build tools are rebuilt or updated
+for the target's USE policy before the final package build.
+
+When Portage reports a first-pass circular dependency and suggests a temporary
+`Change USE:` break, PortageForge applies that suggestion only while resolving
+private bootstrap dependencies. It restores the target Portage config before the
+final `--buildpkgonly` pass, so emitted binpkgs use the target's normal profile
+and USE configuration.
 
 ## Target Setup
 
