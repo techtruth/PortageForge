@@ -1,18 +1,19 @@
 # PortageForge
 
 PortageForge builds Gentoo binary packages for target machines inside a QEMU
-TCG Gentoo VM. The VM applies each target's Portage policy and target CPU
-flags, then serves the resulting binhosts itself over HTTP.
+TCG Gentoo VM. The VM creates a persistent Gentoo chroot for each target,
+applies that target's Portage policy and target CPU flags inside the chroot,
+then serves the resulting binhosts itself over HTTP.
 
 ```text
 target Gentoo machines
   export hostname-named target snapshots and package lists
 
 QEMU TCG Gentoo VM
-  runs emerge --sync
-  applies one target Portage policy at a time
-  builds @portageforge-binhost-packages for each target
-  runs emaint binhost --fix
+  creates one persistent Gentoo chroot per target
+  runs emerge --sync inside each target chroot
+  builds @portageforge-binhost-packages inside each target chroot
+  runs emaint binhost --fix inside each target chroot
   writes each target's binpkgs/distfiles to a host shared directory
   serves the target binhost directories on port 8080
 
@@ -47,7 +48,7 @@ vm/targets/<target-hostname>.packages
 ```
 
 The `*.tar` file contains target configuration/state. The `*.packages` sidecar
-contains plain `category/package` entries derived from the target's installed
+contains repo-qualified package entries derived from the target's installed
 package database. The VM reads `vm/targets/` through a read-only QEMU 9p share.
 
 The snapshot contains:
@@ -71,12 +72,17 @@ The primary build target is stored outside the tar:
 vm/targets/<target-hostname>.packages
 ```
 
-The builder copies that sidecar into the VM as the
-`@portageforge-binhost-packages` Portage set, then compiles the newest visible
-versions allowed by the target profile, `make.conf`, USE flags, masks, keywords,
-package config, and overlays.
-To build additional packages for a target, add more plain `category/package`
-entries to that target's `*.packages` file.
+Each line is a plain package name plus the source repository recorded in the
+target's installed package database, such as `category/package::gentoo` or
+`category/package::pentoo`. The exported file starts with comment lines listing
+the repositories found in the package database. `::gentoo` package entries are
+active by default; non-`::gentoo` entries are preserved but commented out. The
+builder ignores comments and copies active package entries into the
+`@portageforge-binhost-packages` Portage set. Portage then compiles the newest
+visible versions allowed by the target profile, `make.conf`, USE flags, masks,
+keywords, package config, and overlays.
+To build additional packages for a target, add or uncomment repo-qualified
+entries in that target's `*.packages` file.
 
 The snapshot may contain private overlay URLs, package environment files, local
 paths, hostnames, and other machine-specific Portage data. Treat it as private
@@ -139,7 +145,7 @@ That gives you:
 images/portageforge.qcow2   # bootable Gentoo VM image
 images/seed.iso             # first-boot cloud-init bootstrap only
 vm/targets/                 # target snapshots and package lists
-vm/data/targets/            # host-visible per-target binpkg and distfile storage
+vm/data/targets/            # host-visible per-target roots, binpkgs, and distfiles
 ```
 
 The boot QCOW2 is resized to 300 GiB of virtual capacity so
@@ -177,7 +183,7 @@ The QEMU launcher uses:
 UEFI/OVMF firmware
 first-boot cloud-init seed ISO for SSH/bootstrap
 read-only vm/targets directory shared into the VM with QEMU 9p
-writable vm/data directory shared into the VM with QEMU 9p
+writable vm/data directory shared into the VM with QEMU 9p mapped-xattr metadata
 host port 2222 -> VM port 22
 host port 8080 -> VM port 8080
 ```
@@ -205,10 +211,18 @@ tail -f /var/log/portageforge-builder.log
 If you set `ROOT_PASSWORD`, the QEMU console login is `root` with that password.
 
 On start, `portageforge-builder` mounts `vm/data/` from the host at
-`/mnt/portageforge-data` in the VM. Binary packages and distfiles stay directly
-visible on the host. Portage build temp stays inside the VM at
-`/var/tmp/portageforge/targets/<target-hostname>`, because package builds need
-normal VM filesystem behavior and create a lot of small-file churn.
+`/mnt/portageforge-data` in the VM. Each target gets:
+
+```text
+vm/data/targets/<target-hostname>/root/       # persistent Gentoo chroot
+vm/data/targets/<target-hostname>/binpkgs/    # served binary packages
+vm/data/targets/<target-hostname>/distfiles/  # source distfiles
+```
+
+Portage build temp stays inside the VM at
+`/var/tmp/portageforge/targets/<target-hostname>` and is bind-mounted into the
+chroot, because package builds need normal VM filesystem behavior and create a
+lot of small-file churn.
 
 The service runs:
 
@@ -231,15 +245,17 @@ The VM builder does this on each cycle:
 ```text
 mount host vm/targets at /mnt/portageforge-targets
 mount host vm/data at /mnt/portageforge-data
-run emerge --sync
 for each /mnt/portageforge-targets/*.tar:
+  create or reuse vm/data/targets/<target-hostname>/root from a Gentoo stage3
   load /mnt/portageforge-targets/<target-hostname>.packages
-  restore target /etc/portage policy
-  set the target Gentoo profile
-  append PortageForge output paths to make.conf
-  install private build-time dependencies for the target package set
-  build @portageforge-binhost-packages without using the VM's @world
-  run emaint binhost --fix
+  restore target /etc/portage policy into the chroot
+  mount proc/sys/dev/run plus binpkgs/distfiles/temp into the chroot
+  run emerge --sync inside the chroot
+  set the target Gentoo profile inside the chroot
+  install private build-time dependencies inside the chroot
+  build binary packages for @portageforge-binhost-packages inside the chroot
+  run emaint binhost --fix inside the chroot
+  unmount the chroot runtime paths
 serve /mnt/portageforge-data over HTTP
 sleep 24 hours
 ```
@@ -247,12 +263,18 @@ sleep 24 hours
 The binhost emits modern `.gpkg.tar` binary packages. The legacy `xpak` format
 is not supported by this project.
 
+The first build for a target downloads and verifies a current Gentoo stage3
+tarball, unpacks it into the target chroot, then removes the downloaded tarball.
+The builder chooses `amd64-openrc`, `amd64-systemd`, `amd64-nomultilib-openrc`,
+or `amd64-nomultilib-systemd` from the exported profile name.
+
 Some source packages need bootstrap providers or other build-only tools before
 the source package can be built. PortageForge does not keep a hardcoded
 bootstrap package map. Instead, it asks Portage to install the build-time
-dependencies of the target package set with runtime dependencies and binary
-package output disabled, then excludes private builder packages from final
-binpkg output unless they are explicitly part of the target package set.
+dependencies of the target package set inside the target chroot with runtime
+dependencies and binary package output disabled, then builds the target package
+set with `--buildpkgonly` so final target packages are emitted as binpkgs
+without being merged into the target chroot.
 
 ## Target Setup
 
@@ -278,17 +300,18 @@ Packages from this project are unsigned by default, so leave
 
 ## Notes
 
-The VM and target should sync against compatible Gentoo repository state. This
-version assumes both systems run `emerge --sync` normally. If exact repository
-matching becomes necessary, the VM can grow a repository snapshot service later.
+Each target chroot and its target machine should sync against compatible Gentoo
+repository state. This version assumes normal `emerge --sync` behavior on both
+sides. If exact repository matching becomes necessary, the VM can grow a
+repository snapshot service later.
 
 QEMU TCG is slow. It is the correctness path when the physical build host cannot
 execute the target CPU instructions, but a real target-compatible build machine
 will be much faster.
 
 If the target package set includes kernel/module/EFI packages and `make.conf`
-points at secureboot keys, those keys must exist at the same paths inside the VM
-or those packages may fail.
+points at secureboot keys, those keys must exist at the same paths inside the
+target chroot or those packages may fail.
 
 If QEMU does not emulate an instruction exposed by the VM CPU model or generated
 by the target flags, affected packages may fail at build or test time. Start
@@ -299,4 +322,6 @@ References:
 
 - Gentoo Binary Package Guide: <https://wiki.gentoo.org/wiki/Binary_package_guide>
 - Gentoo binary package handbook notes: <https://wiki.gentoo.org/wiki/Handbook:Parts/Working/Features>
+- Gentoo amd64 stage3 autobuilds: <https://distfiles.gentoo.org/releases/amd64/autobuilds/>
+- Portage package sets and repository constraints: <https://dev.gentoo.org/~zmedico/portage/doc/man/portage.5.html>
 - QEMU system emulation: <https://www.qemu.org/docs/master/system/introduction.html>

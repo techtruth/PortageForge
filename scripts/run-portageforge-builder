@@ -58,7 +58,7 @@ qemu_args=(
   -drive "if=pflash,unit=0,readonly=on,file=$OVMF_CODE"
   -drive "file=$DISK_IMAGE,if=virtio,format=qcow2"
   -virtfs "local,path=$TARGETS_DIR,mount_tag=portageforge-targets,security_model=none,readonly=on"
-  -virtfs "local,path=$DATA_DIR,mount_tag=portageforge-data,security_model=none"
+  -virtfs "local,path=$DATA_DIR,mount_tag=portageforge-data,security_model=mapped-xattr"
   -device virtio-net-pci,netdev=net0
   -netdev "user,id=net0,hostfwd=tcp::${SSH_PORT}-:22,hostfwd=tcp::${BINHOST_PORT}-:8080"
   -serial mon:stdio

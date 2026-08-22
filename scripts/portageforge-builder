@@ -2,18 +2,24 @@
 set -Eeuo pipefail
 
 BUILD_INTERVAL_SECONDS=86400
+GENTOO_AUTOBUILDS_URL=https://distfiles.gentoo.org/releases/amd64/autobuilds
 TARGETS_SHARE_TAG=portageforge-targets
 TARGETS_MOUNT=/mnt/portageforge-targets
 TARGET_ROOT=/var/lib/portageforge/target
 DATA_SHARE_TAG=portageforge-data
 DATA_ROOT=/mnt/portageforge-data
 TARGET_DATA_ROOT="$DATA_ROOT/targets"
+STAGE3_TMPDIR=/var/tmp/portageforge/stage3
 PORTAGE_TMPDIR_ROOT=/var/tmp/portageforge/targets
 TARGET_PACKAGE_SET=/etc/portage/sets/portageforge-binhost-packages
+CHROOT_PKGDIR=/portageforge/binpkgs
+CHROOT_DISTDIR=/portageforge/distfiles
+CHROOT_PORTAGE_TMPDIR=/var/tmp/portageforge
 BINHOST_PORT=8080
 CPU_COUNT=$(nproc 2>/dev/null || printf '1')
 HTTP_PID=
 TARGET_NAME=
+TARGET_CHROOT_PATH=
 PKGDIR_PATH=
 DISTDIR_PATH=
 PORTAGE_TMPDIR_PATH=
@@ -25,6 +31,9 @@ fi
 
 # Stop the HTTP server when the build service exits.
 cleanup() {
+  if [[ -n "$TARGET_CHROOT_PATH" ]]; then
+    unmount_target_chroot || true
+  fi
   if [[ -n "$HTTP_PID" ]]; then
     kill "$HTTP_PID" 2>/dev/null || true
   fi
@@ -63,7 +72,7 @@ prepare_data_share() {
     fi
   fi
 
-  mkdir -p "$TARGET_DATA_ROOT" "$PORTAGE_TMPDIR_ROOT"
+  mkdir -p "$TARGET_DATA_ROOT" "$STAGE3_TMPDIR" "$PORTAGE_TMPDIR_ROOT"
 }
 
 # Keep target names usable as URL path segments and local directory names.
@@ -76,7 +85,204 @@ sanitize_target_name() {
   printf '%s' "${name:-target}"
 }
 
-# Turn the target snapshot tar into the live Portage state used by the VM.
+# Fetch one URL to a path using whichever downloader exists in the VM.
+fetch_url() {
+  local destination=$1
+  local url=$2
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL -o "$destination" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$destination" "$url"
+  else
+    printf '[portageforge] error: curl or wget is required to fetch %s\n' "$url" >&2
+    return 1
+  fi
+}
+
+# Choose the closest Gentoo stage3 flavor for the exported target profile.
+stage3_variant_for_profile() {
+  local init_style=openrc
+  local profile=$1
+  local variant=amd64
+
+  if [[ "$profile" == *systemd* ]]; then
+    init_style=systemd
+  fi
+  if [[ "$profile" == *no-multilib* || "$profile" == *nomultilib* ]]; then
+    variant=amd64-nomultilib
+  fi
+
+  printf '%s-%s\n' "$variant" "$init_style"
+}
+
+# Download and verify the current stage3 tarball for a stage3 variant.
+download_stage3() {
+  local actual_hash
+  local archive_path
+  local expected_hash
+  local latest_file
+  local sha_file
+  local stage3_dir
+  local stage3_name
+  local variant=$1
+  local variant_dir
+
+  variant_dir=$(mktemp -d "$STAGE3_TMPDIR/$variant.XXXXXX")
+  stage3_dir="current-stage3-$variant"
+  latest_file="$variant_dir/latest-stage3-$variant.txt"
+
+  if ! fetch_url "$latest_file" "$GENTOO_AUTOBUILDS_URL/$stage3_dir/latest-stage3-$variant.txt" >&2; then
+    rm -rf "$variant_dir"
+    return 1
+  fi
+  stage3_name=$(awk '/^[^#].*\.tar\.(xz|zst)[[:space:]]+[0-9]+/ { print $1; exit }' "$latest_file")
+  if [[ -z "$stage3_name" ]]; then
+    printf '[portageforge] error: could not find stage3 filename in %s\n' "$latest_file" >&2
+    rm -rf "$variant_dir"
+    return 1
+  fi
+
+  archive_path="$variant_dir/$stage3_name"
+  sha_file="$archive_path.sha256"
+  printf '[portageforge] fetching stage3 %s\n' "$stage3_name" >&2
+  if ! fetch_url "$archive_path" "$GENTOO_AUTOBUILDS_URL/$stage3_dir/$stage3_name" >&2; then
+    rm -rf "$variant_dir"
+    return 1
+  fi
+  if ! fetch_url "$sha_file" "$GENTOO_AUTOBUILDS_URL/$stage3_dir/$stage3_name.sha256" >&2; then
+    rm -rf "$variant_dir"
+    return 1
+  fi
+
+  expected_hash=$(awk -v file="$stage3_name" '
+    $0 ~ file {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^[0-9a-fA-F]{64}$/) {
+          print tolower($i)
+          exit
+        }
+      }
+    }
+  ' "$sha_file")
+  if [[ -z "$expected_hash" ]]; then
+    printf '[portageforge] error: could not parse SHA256 from %s\n' "$sha_file" >&2
+    rm -rf "$variant_dir"
+    return 1
+  fi
+  actual_hash=$(sha256sum "$archive_path" | awk '{ print $1 }')
+  if [[ "$actual_hash" != "$expected_hash" ]]; then
+    printf '[portageforge] error: SHA256 mismatch for %s\n' "$stage3_name" >&2
+    rm -rf "$variant_dir"
+    return 1
+  fi
+
+  printf '%s\n' "$archive_path"
+}
+
+# Create or reuse the persistent Gentoo root used to build one target.
+ensure_target_chroot() {
+  local archive_path
+  local current_variant=
+  local profile=$1
+  local variant
+  local variant_file="$TARGET_CHROOT_PATH/.portageforge-stage3-variant"
+  local stage3_download_dir
+
+  variant=$(stage3_variant_for_profile "$profile")
+  if [[ -s "$variant_file" ]]; then
+    current_variant=$(<"$variant_file")
+  fi
+  if [[ -x "$TARGET_CHROOT_PATH/bin/bash" && -x "$TARGET_CHROOT_PATH/usr/bin/emerge" && "$current_variant" == "$variant" ]]; then
+    return
+  fi
+
+  archive_path=$(download_stage3 "$variant")
+  stage3_download_dir=$(dirname "$archive_path")
+  printf '[portageforge] creating %s chroot for %s\n' "$variant" "$TARGET_NAME"
+  unmount_target_chroot || true
+  rm -rf "$TARGET_CHROOT_PATH"
+  mkdir -p "$TARGET_CHROOT_PATH"
+  if ! tar -xpf "$archive_path" -C "$TARGET_CHROOT_PATH" --xattrs --numeric-owner; then
+    rm -rf "$stage3_download_dir"
+    return 1
+  fi
+  printf '%s\n' "$variant" >"$variant_file"
+  rm -rf "$stage3_download_dir"
+}
+
+# Bind one host path into the current target chroot when it is not mounted yet.
+bind_mount_if_needed() {
+  local source=$1
+  local destination=$2
+
+  mkdir -p "$source" "$destination"
+  if ! mountpoint -q "$destination"; then
+    mount --bind "$source" "$destination"
+  fi
+}
+
+# Mount runtime filesystems and Portage artifact paths for the target chroot.
+mount_target_chroot() {
+  mkdir -p \
+    "$TARGET_CHROOT_PATH/proc" \
+    "$TARGET_CHROOT_PATH/sys" \
+    "$TARGET_CHROOT_PATH/dev" \
+    "$TARGET_CHROOT_PATH/run" \
+    "$TARGET_CHROOT_PATH/portageforge/binpkgs" \
+    "$TARGET_CHROOT_PATH/portageforge/distfiles" \
+    "$TARGET_CHROOT_PATH$CHROOT_PORTAGE_TMPDIR"
+
+  if ! mountpoint -q "$TARGET_CHROOT_PATH/proc"; then
+    mount -t proc proc "$TARGET_CHROOT_PATH/proc"
+  fi
+  if ! mountpoint -q "$TARGET_CHROOT_PATH/sys"; then
+    mount --rbind /sys "$TARGET_CHROOT_PATH/sys"
+    mount --make-rslave "$TARGET_CHROOT_PATH/sys" 2>/dev/null || true
+  fi
+  if ! mountpoint -q "$TARGET_CHROOT_PATH/dev"; then
+    mount --rbind /dev "$TARGET_CHROOT_PATH/dev"
+    mount --make-rslave "$TARGET_CHROOT_PATH/dev" 2>/dev/null || true
+  fi
+  if ! mountpoint -q "$TARGET_CHROOT_PATH/run"; then
+    mount --rbind /run "$TARGET_CHROOT_PATH/run"
+    mount --make-rslave "$TARGET_CHROOT_PATH/run" 2>/dev/null || true
+  fi
+
+  bind_mount_if_needed "$PKGDIR_PATH" "$TARGET_CHROOT_PATH$CHROOT_PKGDIR"
+  bind_mount_if_needed "$DISTDIR_PATH" "$TARGET_CHROOT_PATH$CHROOT_DISTDIR"
+  bind_mount_if_needed "$PORTAGE_TMPDIR_PATH" "$TARGET_CHROOT_PATH$CHROOT_PORTAGE_TMPDIR"
+}
+
+# Unmount runtime filesystems and Portage artifact paths for the target chroot.
+unmount_target_chroot() {
+  local mount_path
+
+  for mount_path in \
+    "$TARGET_CHROOT_PATH$CHROOT_PORTAGE_TMPDIR" \
+    "$TARGET_CHROOT_PATH$CHROOT_DISTDIR" \
+    "$TARGET_CHROOT_PATH$CHROOT_PKGDIR" \
+    "$TARGET_CHROOT_PATH/run" \
+    "$TARGET_CHROOT_PATH/dev" \
+    "$TARGET_CHROOT_PATH/sys" \
+    "$TARGET_CHROOT_PATH/proc"; do
+    if [[ -n "$TARGET_CHROOT_PATH" && -e "$mount_path" ]] && mountpoint -q "$mount_path"; then
+      umount -R "$mount_path"
+    fi
+  done
+}
+
+# Run a command inside the current target chroot.
+chroot_run() {
+  chroot "$TARGET_CHROOT_PATH" "$@"
+}
+
+# Run emerge inside the current target chroot.
+chroot_emerge() {
+  chroot_run emerge "$@"
+}
+
+# Turn the target snapshot tar into the persistent chroot state used by Portage.
 prepare_builder_from_snapshot() {
   local archive=$1
   local archive_name
@@ -104,9 +310,15 @@ prepare_builder_from_snapshot() {
   package_list="$TARGETS_MOUNT/${archive_name}.packages"
   PKGDIR_PATH="$TARGET_DATA_ROOT/$TARGET_NAME/binpkgs"
   DISTDIR_PATH="$TARGET_DATA_ROOT/$TARGET_NAME/distfiles"
+  TARGET_CHROOT_PATH="$TARGET_DATA_ROOT/$TARGET_NAME/root"
   PORTAGE_TMPDIR_PATH="$PORTAGE_TMPDIR_ROOT/$TARGET_NAME"
   mkdir -p "$PKGDIR_PATH" "$DISTDIR_PATH" "$PORTAGE_TMPDIR_PATH"
 
+  if [[ -d "$package_list" ]]; then
+    printf '[portageforge] error: target package path must be a repo-qualified package file, not a directory: %s\n' "$package_list" >&2
+    printf '[portageforge] error: re-run make export-target-state on the target to create a single %s file\n' "$package_list" >&2
+    exit 1
+  fi
   if [[ ! -s "$package_list" ]]; then
     printf '[portageforge] error: target package list not found or empty: %s\n' "$package_list" >&2
     exit 1
@@ -131,14 +343,15 @@ prepare_builder_from_snapshot() {
     exit 1
   fi
 
-  printf '[portageforge] applying target /etc/portage snapshot\n'
-  rm -rf /etc/portage
-  mkdir -p /etc
-  cp -a "$TARGET_ROOT/etc/portage" /etc/portage
-  rm -rf /etc/portage/make.profile
-  mkdir -p /etc/portage/sets
-  awk 'NF && $1 !~ /^#/ { print $1 }' "$package_list" | sort -u >"$TARGET_PACKAGE_SET"
-  if [[ ! -s "$TARGET_PACKAGE_SET" ]]; then
+  ensure_target_chroot "$profile"
+
+  printf '[portageforge] applying target /etc/portage snapshot to chroot\n'
+  rm -rf "$TARGET_CHROOT_PATH/etc/portage"
+  mkdir -p "$TARGET_CHROOT_PATH/etc"
+  cp -a "$TARGET_ROOT/etc/portage" "$TARGET_CHROOT_PATH/etc/portage"
+  mkdir -p "$TARGET_CHROOT_PATH/etc/portage/sets"
+  load_target_package_set "$package_list"
+  if [[ ! -s "$TARGET_CHROOT_PATH$TARGET_PACKAGE_SET" ]]; then
     printf '[portageforge] error: target package list has no package entries: %s\n' "$package_list" >&2
     exit 1
   fi
@@ -147,27 +360,39 @@ prepare_builder_from_snapshot() {
     cat "$TARGET_ROOT/etc/portage/make.conf"
     printf '\n# BEGIN portageforge-builder\n'
     printf 'FEATURES="${FEATURES} buildpkg binpkg-multi-instance"\n'
-    printf 'PKGDIR="%s"\n' "$PKGDIR_PATH"
-    printf 'DISTDIR="%s"\n' "$DISTDIR_PATH"
-    printf 'PORTAGE_TMPDIR="%s"\n' "$PORTAGE_TMPDIR_PATH"
+    printf 'PKGDIR="%s"\n' "$CHROOT_PKGDIR"
+    printf 'DISTDIR="%s"\n' "$CHROOT_DISTDIR"
+    printf 'PORTAGE_TMPDIR="%s"\n' "$CHROOT_PORTAGE_TMPDIR"
     printf 'BINPKG_FORMAT="gpkg"\n'
     printf 'MAKEOPTS="-j%s"\n' "$BUILD_JOBS"
     printf '# END portageforge-builder\n'
-  } >/etc/portage/make.conf
+  } >"$TARGET_CHROOT_PATH/etc/portage/make.conf"
 
   printf '[portageforge] target binhost path: /targets/%s/binpkgs/\n' "$TARGET_NAME"
   printf '[portageforge] using %s build job(s)\n' "$BUILD_JOBS"
-  printf '[portageforge] loaded %s binhost package entries\n' "$(wc -l <"$TARGET_PACKAGE_SET")"
+  printf '[portageforge] loaded %s binhost package entries\n' "$(wc -l <"$TARGET_CHROOT_PATH$TARGET_PACKAGE_SET")"
 }
 
-# List package names currently installed in the builder VM root.
-installed_root_package_names() {
+# Copy the repo-qualified target package list into the Portage set used by emerge.
+load_target_package_set() {
+  local package_list=$1
+
+  awk 'NF && $1 !~ /^#/ { print $1 }' "$package_list" | sort -u >"$TARGET_CHROOT_PATH$TARGET_PACKAGE_SET"
+}
+
+# Strip repository constraints so installed package names can be compared.
+target_package_names() {
+  sed 's/::[A-Za-z0-9._-]\+$//' "$TARGET_CHROOT_PATH$TARGET_PACKAGE_SET" | sort -u
+}
+
+# List package names currently installed in the target chroot.
+installed_chroot_package_names() {
   local category
   local pkgdir
   local pn
   local pnvr
 
-  for pkgdir in /var/db/pkg/*/*; do
+  for pkgdir in "$TARGET_CHROOT_PATH/var/db/pkg"/*/*; do
     [[ -d "$pkgdir" ]] || continue
     category=${pkgdir%/*}
     category=${category##*/}
@@ -177,16 +402,17 @@ installed_root_package_names() {
   done | sort -u
 }
 
-# Install build-time dependencies that are private to the builder VM.
+# Install build-time dependencies that are private to the target chroot.
 install_private_build_dependencies() {
   local private_installed_packages=$1
   shift
   local targets=("$@")
+  local target_package_names_file="$PORTAGE_TMPDIR_PATH/target-package-names"
 
   mkdir -p "$PORTAGE_TMPDIR_PATH"
 
-  printf '[portageforge] resolving private builder build-time dependencies\n'
-  emerge \
+  printf '[portageforge] resolving private chroot build-time dependencies\n'
+  chroot_emerge \
     --usepkg=n \
     --getbinpkg=n \
     --oneshot \
@@ -198,17 +424,18 @@ install_private_build_dependencies() {
     --jobs="$BUILD_JOBS" \
     "${targets[@]}"
 
-  installed_root_package_names | comm -23 - "$TARGET_PACKAGE_SET" >"$private_installed_packages"
+  target_package_names >"$target_package_names_file"
+  installed_chroot_package_names | comm -23 - "$target_package_names_file" >"$private_installed_packages"
   if [[ -s "$private_installed_packages" ]]; then
-    printf '[portageforge] excluding %s private builder package(s) from binpkg output\n' "$(wc -l <"$private_installed_packages")"
+    printf '[portageforge] excluding %s private chroot package(s) from binpkg output\n' "$(wc -l <"$private_installed_packages")"
   fi
 }
 
-# Copy one optional target snapshot path into the VM root filesystem.
+# Copy one optional target snapshot path into the target chroot.
 restore_snapshot_path() {
   local relative_path=$1
   local source="$TARGET_ROOT/$relative_path"
-  local destination="/$relative_path"
+  local destination="$TARGET_CHROOT_PATH/$relative_path"
 
   if [[ -e "$source" || -L "$source" ]]; then
     mkdir -p "$(dirname "$destination")"
@@ -231,12 +458,16 @@ restore_target_environment_state() {
     restore_snapshot_path "$snapshot_path"
   done
 
-  if [[ -e /etc/locale.gen ]] && command -v locale-gen >/dev/null 2>&1; then
-    locale-gen
+  if [[ -e /etc/resolv.conf ]]; then
+    cp -L /etc/resolv.conf "$TARGET_CHROOT_PATH/etc/resolv.conf"
   fi
 
-  if command -v env-update >/dev/null 2>&1; then
-    env-update
+  if [[ -e "$TARGET_CHROOT_PATH/etc/locale.gen" ]] && [[ -x "$TARGET_CHROOT_PATH/usr/sbin/locale-gen" ]]; then
+    chroot_run locale-gen
+  fi
+
+  if [[ -x "$TARGET_CHROOT_PATH/usr/sbin/env-update" ]]; then
+    chroot_run env-update
   fi
 }
 
@@ -248,7 +479,7 @@ emerge_target_packages() {
     --oneshot
     --ignore-world=y
     --with-bdeps=y
-    --buildpkg=y
+    --buildpkgonly=y
     --jobs="$BUILD_JOBS"
   )
   local buildpkg_exclude
@@ -270,7 +501,7 @@ emerge_target_packages() {
     emerge_args+=(--emptytree)
   fi
 
-  emerge "${emerge_args[@]}" "${targets[@]}"
+  chroot_emerge "${emerge_args[@]}" "${targets[@]}"
 }
 
 # Serve the data directory over HTTP so each target gets its own binhost URL.
@@ -301,23 +532,44 @@ start_binhost_server() {
 build_target() {
   local archive=$1
   local profile
+  local result=0
 
   prepare_builder_from_snapshot "$archive"
   profile=$(awk 'NF { print; exit }' "$TARGET_ROOT/metadata/profile")
+  mount_target_chroot
 
-  printf '[portageforge] setting Gentoo profile to %s\n' "$profile"
-  eselect profile set "$profile"
+  printf '[portageforge] syncing target repositories for %s\n' "$TARGET_NAME"
+  if ! chroot_emerge --sync; then
+    printf '[portageforge] error: repository sync failed for %s\n' "$TARGET_NAME" >&2
+    result=1
+  fi
 
-  if ! emerge_target_packages; then
+  if [[ "$result" -eq 0 ]]; then
+    printf '[portageforge] setting Gentoo profile to %s\n' "$profile"
+    if ! chroot_run eselect profile set "$profile"; then
+      printf '[portageforge] error: profile selection failed for %s\n' "$TARGET_NAME" >&2
+      result=1
+    fi
+  fi
+
+  if [[ "$result" -eq 0 ]] && ! emerge_target_packages; then
     printf '[portageforge] error: target build failed for %s\n' "$TARGET_NAME" >&2
-    return 1
+    result=1
   fi
 
-  printf '[portageforge] refreshing binhost package index\n'
-  if ! emaint binhost --fix; then
-    printf '[portageforge] error: binhost index refresh failed for %s\n' "$TARGET_NAME" >&2
-    return 1
+  if [[ "$result" -eq 0 ]]; then
+    printf '[portageforge] refreshing binhost package index\n'
+    if ! chroot_run emaint binhost --fix; then
+      printf '[portageforge] error: binhost index refresh failed for %s\n' "$TARGET_NAME" >&2
+      result=1
+    fi
   fi
+
+  if ! unmount_target_chroot; then
+    printf '[portageforge] error: could not unmount target chroot for %s\n' "$TARGET_NAME" >&2
+    result=1
+  fi
+  return "$result"
 }
 
 # Run one daily sync, then build every target snapshot in sorted order.
@@ -331,12 +583,6 @@ build_cycle() {
     exit 1
   fi
   printf '[portageforge] found %s target snapshot(s)\n' "${#archives[@]}"
-
-  printf '[portageforge] syncing Gentoo repositories\n'
-  if ! emerge --sync; then
-    printf '[portageforge] error: repository sync failed\n' >&2
-    return 1
-  fi
 
   for archive in "${archives[@]}"; do
     printf '[portageforge] starting target snapshot %s\n' "$archive"

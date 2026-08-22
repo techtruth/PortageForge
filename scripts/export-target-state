@@ -14,11 +14,21 @@ profile_name() {
   eselect profile show 2>/dev/null | awk '/^  / { print $1; exit }'
 }
 
+safe_name() {
+  local name=$1
+
+  name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '-')
+  name=${name##-}
+  name=${name%%-}
+  printf '%s' "${name:-target}"
+}
+
 binhost_package_entries() {
   local category
   local pkgdir
   local pn
   local pnvr
+  local repository
 
   if [[ ! -d "$PACKAGE_DB" ]]; then
     return
@@ -30,7 +40,16 @@ binhost_package_entries() {
     category=${category##*/}
     pnvr=${pkgdir##*/}
     pn=${pnvr%-[0-9]*}
-    printf '%s/%s\n' "$category" "$pn"
+    if [[ ! -s "$pkgdir/repository" ]]; then
+      printf '[export-target] error: installed package is missing repository metadata: %s/%s\n' "$category" "$pnvr" >&2
+      return 1
+    fi
+    repository=$(awk 'NF { print $1; exit }' "$pkgdir/repository")
+    if [[ -z "$repository" || ! "$repository" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      printf '[export-target] error: installed package has invalid repository metadata: %s/%s\n' "$category" "$pnvr" >&2
+      return 1
+    fi
+    printf '%s/%s::%s\n' "$category" "$pn" "$repository"
   done | sort -u
 }
 
@@ -61,13 +80,16 @@ if [[ -z "$profile" ]]; then
 fi
 
 target_hostname=$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'target')
-target_hostname=$(printf '%s' "$target_hostname" | tr -c 'A-Za-z0-9._-' '-')
-target_hostname=${target_hostname:-target}
+target_hostname=$(safe_name "$target_hostname")
 mkdir -p "$out_dir"
 out_file="${out_dir}/${target_hostname}.tar"
 packages_file="${out_dir}/${target_hostname}.packages"
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
+active_entries=0
+commented_entries=0
+entries_file="$tmpdir/package-entries"
+repositories_file="$tmpdir/repositories"
 
 mkdir -p "$tmpdir/etc" "$tmpdir/metadata"
 cp -a "$PORTAGE_DIR" "$tmpdir/etc/portage"
@@ -78,11 +100,28 @@ copy_if_present /etc/python-exec "$tmpdir/etc/python-exec"
 copy_if_present /etc/java-config-2 "$tmpdir/etc/java-config-2"
 copy_if_present /etc/locale.gen "$tmpdir/etc/locale.gen"
 copy_if_present /usr/src/linux "$tmpdir/usr/src/linux"
-binhost_package_entries >"$packages_file"
-if [[ ! -s "$packages_file" ]]; then
+rm -rf "$packages_file"
+binhost_package_entries >"$entries_file"
+if [[ ! -s "$entries_file" ]]; then
   printf '[export-target] error: no binhost package entries found in %s\n' "$PACKAGE_DB" >&2
   exit 1
 fi
+active_entries=$(awk '$0 ~ /::gentoo$/ { count++ } END { print count + 0 }' "$entries_file")
+commented_entries=$(awk '$0 !~ /::gentoo$/ { count++ } END { print count + 0 }' "$entries_file")
+sed -n 's/^.*:://p' "$entries_file" | sort -u >"$repositories_file"
+{
+  printf '# PortageForge target package list\n'
+  printf '# Repositories:\n'
+  while IFS= read -r repository; do
+    if [[ "$repository" == gentoo ]]; then
+      printf '# - %s (active)\n' "$repository"
+    else
+      printf '# - %s (commented out)\n' "$repository"
+    fi
+  done <"$repositories_file"
+  printf '\n'
+  awk '{ if ($0 ~ /::gentoo$/) print; else print "# " $0 }' "$entries_file"
+} >"$packages_file"
 
 printf '%s\n' "$target_hostname" >"$tmpdir/metadata/hostname"
 printf '%s\n' "$profile" >"$tmpdir/metadata/profile"
@@ -92,4 +131,5 @@ tar -C "$tmpdir" -cf "$out_file" .
 
 printf '[export-target] wrote %s\n' "$out_file" >&2
 printf '[export-target] wrote %s\n' "$packages_file" >&2
-printf '[export-target] captured %s binhost package entries\n' "$(wc -l <"$packages_file")" >&2
+printf '[export-target] captured %s active gentoo package entries\n' "$active_entries" >&2
+printf '[export-target] commented out %s non-gentoo package entries\n' "$commented_entries" >&2
