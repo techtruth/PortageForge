@@ -159,7 +159,7 @@ cloud-init data on first boot. PortageForge uses it only to:
 ```text
 install your SSH public key for root and/or set a root password
 write /usr/local/sbin/portageforge-builder into the VM
-write a tiny OpenRC service launcher into the VM
+write a systemd service for the builder into the VM
 enable sshd and the PortageForge builder service
 ```
 

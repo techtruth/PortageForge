@@ -184,36 +184,43 @@ EOF
   printf '%s\n' "$builder_script_b64" | sed 's/^/      /' >>"$SEED_DIR/user-data"
 
   cat >>"$SEED_DIR/user-data" <<EOF
-  - path: /etc/init.d/portageforge-builder
+  - path: /etc/systemd/system/portageforge-builder.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=PortageForge builder
+      After=network-online.target sshd.service ssh.service
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      ExecStart=/bin/sh -c 'exec /usr/local/sbin/portageforge-builder >>/var/log/portageforge-builder.log 2>&1'
+      Restart=always
+      RestartSec=30
+
+      [Install]
+      WantedBy=multi-user.target
+  - path: /usr/local/sbin/portageforge-bootstrap
     permissions: '0755'
     content: |
-      #!/sbin/openrc-run
+      #!/bin/sh
+      set -eu
 
-      name="PortageForge builder"
-      description="Build and serve target-optimized Gentoo binary packages"
-      command="/usr/local/sbin/portageforge-builder"
-      command_background="yes"
-      pidfile="/run/portageforge-builder.pid"
-      output_log="/var/log/portageforge-builder.log"
-      error_log="/var/log/portageforge-builder.log"
+      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-      depend() {
-        need net
-        after sshd
-      }
+      mkdir -p /var/tmp/portageforge /run
 
-      start_pre() {
-        mkdir -p /var/tmp/portageforge
-        if [ ! -x /usr/local/sbin/portageforge-builder ]; then
-          eerror "builder script is not executable: /usr/local/sbin/portageforge-builder"
-          return 1
-        fi
-      }
+      if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+        echo "[portageforge-bootstrap] systemd is required for this image" >&2
+        exit 1
+      fi
+
+      systemctl daemon-reload
+      systemctl enable sshd.service 2>/dev/null || systemctl enable ssh.service 2>/dev/null || true
+      systemctl restart sshd.service 2>/dev/null || systemctl restart ssh.service 2>/dev/null || true
+      systemctl enable --now portageforge-builder.service
 runcmd:
-  - rc-update add sshd default
-  - rc-service sshd restart
-  - rc-update add portageforge-builder default
-  - sh -c 'rc-service portageforge-builder restart || rc-service portageforge-builder start'
+  - /usr/local/sbin/portageforge-bootstrap
 EOF
 
   genisoimage -quiet -output "$SEED_ISO" -volid cidata -joliet -rock "$SEED_DIR/user-data" "$SEED_DIR/meta-data"
