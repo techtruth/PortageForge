@@ -146,7 +146,7 @@ That gives you:
 images/portageforge.qcow2   # bootable Gentoo VM image
 images/seed.iso             # first-boot cloud-init bootstrap only
 vm/targets/                 # target snapshots and package lists
-vm/data/targets/            # host-visible per-target roots, binpkgs, and distfiles
+vm/data/targets/            # host-visible per-target binpkgs and distfiles
 ```
 
 The boot QCOW2 is resized to 300 GiB of virtual capacity so
@@ -212,18 +212,20 @@ tail -f /var/log/portageforge-builder.log
 If you set `ROOT_PASSWORD`, the QEMU console login is `root` with that password.
 
 On start, `portageforge-builder` mounts `vm/data/` from the host at
-`/mnt/portageforge-data` in the VM. Each target gets:
+`/mnt/portageforge-data` in the VM. Each target keeps the chroot root on the
+VM's normal qcow2 filesystem and exposes only package artifacts through the host
+share:
 
 ```text
-vm/data/targets/<target-hostname>/root/       # persistent Gentoo chroot
-vm/data/targets/<target-hostname>/binpkgs/    # served binary packages
-vm/data/targets/<target-hostname>/distfiles/  # source distfiles
+/var/lib/portageforge/targets/<target-hostname>/root/  # persistent Gentoo chroot
+vm/data/targets/<target-hostname>/binpkgs/              # served binary packages
+vm/data/targets/<target-hostname>/distfiles/            # source distfiles
 ```
 
-Portage build temp stays inside the VM at
-`/var/tmp/portageforge/targets/<target-hostname>` and is bind-mounted into the
-chroot, because package builds need normal VM filesystem behavior and create a
-lot of small-file churn.
+The chroot root and Portage build temp stay inside the VM because package builds
+and tools like `localedef` need normal VM filesystem behavior. Binpkgs and
+distfiles are bind-mounted into the chroot from `vm/data/` so they remain
+host-visible.
 
 The service runs:
 
@@ -247,7 +249,7 @@ The VM builder does this on each cycle:
 mount host vm/targets at /mnt/portageforge-targets
 mount host vm/data at /mnt/portageforge-data
 for each /mnt/portageforge-targets/*.tar:
-  create or reuse vm/data/targets/<target-hostname>/root from a Gentoo stage3
+  create or reuse /var/lib/portageforge/targets/<target-hostname>/root from stage3
   load /mnt/portageforge-targets/<target-hostname>.packages
   restore target /etc/portage policy into the chroot
   mount proc/sys/dev/run plus binpkgs/distfiles/temp into the chroot
