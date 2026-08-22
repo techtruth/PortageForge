@@ -14,7 +14,8 @@ TARGETS_DIR="$VM_DIR/targets"
 DATA_DIR="$VM_DIR/data"
 SEED_DIR="$IMAGES_DIR/cloud-init"
 SEED_ISO="$IMAGES_DIR/seed.iso"
-PUBLIC_KEY=${1:-}
+SSH_PUBLIC_KEY=${SSH_PUBLIC_KEY:-${1:-}}
+ROOT_PASSWORD=${ROOT_PASSWORD:-}
 VM_BUILDER_SCRIPT="$REPO_ROOT/scripts/portageforge-builder"
 
 require_command() {
@@ -27,14 +28,16 @@ require_command() {
 }
 
 find_public_key() {
-  if [[ -n "$PUBLIC_KEY" ]]; then
-    printf '%s\n' "$PUBLIC_KEY"
+  if [[ -n "$SSH_PUBLIC_KEY" ]]; then
+    printf '%s\n' "$SSH_PUBLIC_KEY"
+  elif [[ -n "$ROOT_PASSWORD" ]]; then
+    return
   elif [[ -f "$HOME/.ssh/id_ed25519.pub" ]]; then
     printf '%s\n' "$HOME/.ssh/id_ed25519.pub"
   elif [[ -f "$HOME/.ssh/id_rsa.pub" ]]; then
     printf '%s\n' "$HOME/.ssh/id_rsa.pub"
   else
-    printf '[setup-portageforge-builder] error: pass an SSH public key path, or create ~/.ssh/id_ed25519.pub\n' >&2
+    printf '[setup-portageforge-builder] error: provide SSH_PUBLIC_KEY or ROOT_PASSWORD\n' >&2
     exit 1
   fi
 }
@@ -88,11 +91,25 @@ fetch_boot_image() {
 create_seed_iso() {
   local public_key=$1
   local builder_script_b64
+  local password_authentication=no
+  local permit_root_login=prohibit-password
+  local root_lock=true
   local ssh_key
+  local ssh_pwauth=false
   local instance_id
 
-  if [[ ! -f "$public_key" ]]; then
+  if [[ -n "$public_key" && ! -f "$public_key" ]]; then
     printf '[setup-portageforge-builder] error: SSH public key not found: %s\n' "$public_key" >&2
+    exit 1
+  fi
+
+  if [[ -z "$public_key" && -z "$ROOT_PASSWORD" ]]; then
+    printf '[setup-portageforge-builder] error: provide SSH_PUBLIC_KEY or ROOT_PASSWORD\n' >&2
+    exit 1
+  fi
+
+  if [[ "$ROOT_PASSWORD" == *$'\n'* || "$ROOT_PASSWORD" == *$'\r'* ]]; then
+    printf '[setup-portageforge-builder] error: ROOT_PASSWORD cannot contain newlines\n' >&2
     exit 1
   fi
 
@@ -103,7 +120,17 @@ create_seed_iso() {
 
   mkdir -p "$SEED_DIR"
 
-  ssh_key=$(<"$public_key")
+  if [[ -n "$public_key" ]]; then
+    ssh_key=$(<"$public_key")
+  else
+    ssh_key=
+  fi
+  if [[ -n "$ROOT_PASSWORD" ]]; then
+    root_lock=false
+    ssh_pwauth=true
+    permit_root_login=yes
+    password_authentication=yes
+  fi
   builder_script_b64=$(base64 "$VM_BUILDER_SCRIPT")
   instance_id="portageforge-$(date +%s)"
 
@@ -112,25 +139,43 @@ instance-id: $instance_id
 local-hostname: portageforge
 EOF
 
-  cat >"$SEED_DIR/user-data" <<EOF
+cat >"$SEED_DIR/user-data" <<EOF
 #cloud-config
 disable_root: false
-ssh_pwauth: false
+ssh_pwauth: $ssh_pwauth
 growpart:
   mode: auto
   devices: ['/']
 resize_rootfs: true
 users:
   - name: root
-    lock_passwd: true
+    lock_passwd: $root_lock
+EOF
+
+  if [[ -n "$ssh_key" ]]; then
+    cat >>"$SEED_DIR/user-data" <<EOF
     ssh_authorized_keys:
       - $ssh_key
+EOF
+  fi
+
+  if [[ -n "$ROOT_PASSWORD" ]]; then
+    cat >>"$SEED_DIR/user-data" <<EOF
+chpasswd:
+  expire: false
+  list: |
+EOF
+    printf '    root:%s\n' "$ROOT_PASSWORD" >>"$SEED_DIR/user-data"
+  fi
+
+  cat >>"$SEED_DIR/user-data" <<EOF
 write_files:
   - path: /etc/ssh/sshd_config.d/portageforge.conf
     permissions: '0644'
     content: |
-      PermitRootLogin prohibit-password
+      PermitRootLogin $permit_root_login
       PubkeyAuthentication yes
+      PasswordAuthentication $password_authentication
   - path: /usr/local/sbin/portageforge-builder
     permissions: '0755'
     encoding: b64
@@ -172,7 +217,14 @@ runcmd:
 EOF
 
   genisoimage -quiet -output "$SEED_ISO" -volid cidata -joliet -rock "$SEED_DIR/user-data" "$SEED_DIR/meta-data"
-  printf '[setup-portageforge-builder] created %s using %s\n' "$SEED_ISO" "$public_key"
+  if [[ -n "$public_key" ]]; then
+    printf '[setup-portageforge-builder] configured root SSH key from %s\n' "$public_key"
+  fi
+  if [[ -n "$ROOT_PASSWORD" ]]; then
+    printf '[setup-portageforge-builder] configured root password login\n'
+    printf '[setup-portageforge-builder] warning: the root password is stored in %s and %s\n' "$SEED_DIR/user-data" "$SEED_ISO" >&2
+  fi
+  printf '[setup-portageforge-builder] created %s\n' "$SEED_ISO"
 }
 
 cd "$REPO_ROOT"

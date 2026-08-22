@@ -123,6 +123,23 @@ To use a specific SSH public key for the VM root login:
 make setup SSH_PUBLIC_KEY=~/.ssh/id_ed25519.pub
 ```
 
+To set a root password for console login and SSH password login:
+
+```sh
+make setup ROOT_PASSWORD='change-me'
+```
+
+You can provide both:
+
+```sh
+make setup SSH_PUBLIC_KEY=~/.ssh/id_ed25519.pub ROOT_PASSWORD='change-me'
+```
+
+If neither value is provided, setup uses `~/.ssh/id_ed25519.pub` or
+`~/.ssh/id_rsa.pub` when present. Passwords are written into
+`images/cloud-init/user-data` and `images/seed.iso`, so treat those files as
+sensitive.
+
 That gives you:
 
 ```text
@@ -140,7 +157,7 @@ as the VM actually writes data.
 cloud-init data on first boot. PortageForge uses it only to:
 
 ```text
-install your SSH public key for root
+install your SSH public key for root and/or set a root password
 write /usr/local/sbin/portageforge-builder into the VM
 write a tiny OpenRC service launcher into the VM
 enable sshd and the PortageForge builder service
@@ -155,9 +172,9 @@ All QEMU host filesystem shares are inside this project's `vm/` directory. The
 launcher exports `vm/targets/` as read-only and `vm/data/` as writable.
 
 Re-run `make setup` when you need to recreate the VM disks, change the
-bootstrap SSH key, or update the in-VM builder/service scripts embedded in
-`images/seed.iso`. Replacing target snapshots, package lists, or request files
-does not require rebuilding the seed.
+bootstrap SSH key, change the root password, or update the in-VM
+builder/service scripts embedded in `images/seed.iso`. Replacing target
+snapshots, package lists, or request files does not require rebuilding the seed.
 
 The QEMU launcher uses:
 
@@ -191,6 +208,8 @@ the default QEMU SSH forward:
 ssh -p 2222 root@localhost
 tail -f /var/log/portageforge-builder.log
 ```
+
+If you set `ROOT_PASSWORD`, the QEMU console login is `root` with that password.
 
 On start, `portageforge-builder` mounts `vm/data/` from the host at
 `/mnt/portageforge-data` in the VM. Binary packages and distfiles stay directly
