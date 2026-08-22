@@ -19,7 +19,6 @@ binhost_package_atoms() {
   local pkgdir
   local pn
   local pnvr
-  local slot
 
   if [[ ! -d "$PACKAGE_DB" ]]; then
     return
@@ -31,13 +30,7 @@ binhost_package_atoms() {
     category=${category##*/}
     pnvr=${pkgdir##*/}
     pn=${pnvr%-[0-9]*}
-    if [[ -s "$pkgdir/SLOT" ]]; then
-      slot=$(<"$pkgdir/SLOT")
-      slot=${slot%%/*}
-      printf '%s/%s:%s\n' "$category" "$pn" "$slot"
-    else
-      printf '%s/%s\n' "$category" "$pn"
-    fi
+    printf '%s/%s\n' "$category" "$pn"
   done | sort -u
 }
 

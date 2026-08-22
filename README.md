@@ -47,8 +47,8 @@ vm/targets/<target-hostname>.packages
 ```
 
 The `*.tar` file contains target configuration/state. The `*.packages` sidecar
-contains the installed package atoms the binhost should build for that target.
-The VM reads `vm/targets/` through a read-only QEMU 9p share.
+contains unversioned, unslotted package atoms derived from the target's installed
+package database. The VM reads `vm/targets/` through a read-only QEMU 9p share.
 
 The snapshot contains:
 
@@ -72,9 +72,9 @@ vm/targets/<target-hostname>.packages
 ```
 
 The builder copies that sidecar into the VM as the
-`@portageforge-binhost-packages` Portage set, then compiles the current versions
-allowed by the target profile, `make.conf`, USE flags, masks, keywords, package
-config, and overlays.
+`@portageforge-binhost-packages` Portage set, then compiles the newest visible
+versions allowed by the target profile, `make.conf`, USE flags, masks, keywords,
+package config, and overlays.
 
 The snapshot may contain private overlay URLs, package environment files, local
 paths, hostnames, and other machine-specific Portage data. Treat it as private

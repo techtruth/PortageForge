@@ -195,8 +195,7 @@ EOF
       [Service]
       Type=simple
       ExecStart=/bin/sh -c 'exec /usr/local/sbin/portageforge-builder >>/var/log/portageforge-builder.log 2>&1'
-      Restart=always
-      RestartSec=30
+      Restart=no
 
       [Install]
       WantedBy=multi-user.target

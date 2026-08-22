@@ -279,10 +279,16 @@ build_target() {
   printf '[portageforge] setting Gentoo profile to %s\n' "$profile"
   eselect profile set "$profile"
 
-  emerge_target_packages
+  if ! emerge_target_packages; then
+    printf '[portageforge] error: target build failed for %s\n' "$TARGET_NAME" >&2
+    return 1
+  fi
 
   printf '[portageforge] refreshing binhost package index\n'
-  emaint binhost --fix
+  if ! emaint binhost --fix; then
+    printf '[portageforge] error: binhost index refresh failed for %s\n' "$TARGET_NAME" >&2
+    return 1
+  fi
 }
 
 # Run one daily sync, then build every target snapshot in sorted order.
@@ -298,7 +304,10 @@ build_cycle() {
   printf '[portageforge] found %s target snapshot(s)\n' "${#archives[@]}"
 
   printf '[portageforge] syncing Gentoo repositories\n'
-  emerge --sync
+  if ! emerge --sync; then
+    printf '[portageforge] error: repository sync failed\n' >&2
+    return 1
+  fi
 
   for archive in "${archives[@]}"; do
     printf '[portageforge] starting target snapshot %s\n' "$archive"
@@ -311,6 +320,7 @@ prepare_data_share
 start_binhost_server
 while true; do
   build_cycle
+  printf '[portageforge] build cycle completed successfully\n'
   printf '[portageforge] sleeping %ss before next sync/build\n' "$BUILD_INTERVAL_SECONDS"
   sleep "$BUILD_INTERVAL_SECONDS"
 done
