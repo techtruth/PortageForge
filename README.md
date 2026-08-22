@@ -47,7 +47,7 @@ vm/targets/<target-hostname>.packages
 ```
 
 The `*.tar` file contains target configuration/state. The `*.packages` sidecar
-contains unversioned, unslotted package atoms derived from the target's installed
+contains plain `category/package` entries derived from the target's installed
 package database. The VM reads `vm/targets/` through a read-only QEMU 9p share.
 
 The snapshot contains:
@@ -75,19 +75,12 @@ The builder copies that sidecar into the VM as the
 `@portageforge-binhost-packages` Portage set, then compiles the newest visible
 versions allowed by the target profile, `make.conf`, USE flags, masks, keywords,
 package config, and overlays.
+To build additional packages for a target, add more plain `category/package`
+entries to that target's `*.packages` file.
 
 The snapshot may contain private overlay URLs, package environment files, local
 paths, hostnames, and other machine-specific Portage data. Treat it as private
 host configuration, not as a public artifact.
-
-## Package Requests
-
-When you want the VM to prebuild software for every target that is not yet in
-the exported binhost package sets, add package atoms on the QEMU host:
-
-```text
-vm/targets/requested-packages
-```
 
 ## Host Setup
 
@@ -145,7 +138,7 @@ That gives you:
 ```text
 images/portageforge.qcow2   # bootable Gentoo VM image
 images/seed.iso             # first-boot cloud-init bootstrap only
-vm/targets/                 # target snapshots, package lists, and requests
+vm/targets/                 # target snapshots and package lists
 vm/data/targets/            # host-visible per-target binpkg and distfile storage
 ```
 
@@ -166,7 +159,7 @@ enable sshd and the PortageForge builder service
 The builder script is embedded into `images/seed.iso` as cloud-init `write_files`
 content and written into the VM at `/usr/local/sbin/portageforge-builder`.
 Its source lives at `scripts/portageforge-builder`; `vm/targets/` is only for
-target input files such as target snapshot tars, package lists, and requests.
+target input files such as target snapshot tars and package lists.
 
 All QEMU host filesystem shares are inside this project's `vm/` directory. The
 launcher exports `vm/targets/` as read-only and `vm/data/` as writable.
@@ -174,7 +167,7 @@ launcher exports `vm/targets/` as read-only and `vm/data/` as writable.
 Re-run `make setup` when you need to recreate the VM disks, change the
 bootstrap SSH key, change the root password, or update the in-VM
 builder/service scripts embedded in `images/seed.iso`. Replacing target
-snapshots, package lists, or request files does not require rebuilding the seed.
+snapshots or package lists does not require rebuilding the seed.
 
 The QEMU launcher uses:
 
@@ -244,7 +237,8 @@ for each /mnt/portageforge-targets/*.tar:
   restore target /etc/portage policy
   set the target Gentoo profile
   append PortageForge output paths to make.conf
-  build @portageforge-binhost-packages and @portageforge-requested
+  install private build-time dependencies for the target package set
+  build @portageforge-binhost-packages without using the VM's @world
   run emaint binhost --fix
 serve /mnt/portageforge-data over HTTP
 sleep 24 hours
@@ -252,6 +246,13 @@ sleep 24 hours
 
 The binhost emits modern `.gpkg.tar` binary packages. The legacy `xpak` format
 is not supported by this project.
+
+Some source packages need bootstrap providers or other build-only tools before
+the source package can be built. PortageForge does not keep a hardcoded
+bootstrap package map. Instead, it asks Portage to install the build-time
+dependencies of the target package set with runtime dependencies and binary
+package output disabled, then excludes private builder packages from final
+binpkg output unless they are explicitly part of the target package set.
 
 ## Target Setup
 

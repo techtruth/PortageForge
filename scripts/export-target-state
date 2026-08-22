@@ -14,7 +14,7 @@ profile_name() {
   eselect profile show 2>/dev/null | awk '/^  / { print $1; exit }'
 }
 
-binhost_package_atoms() {
+binhost_package_entries() {
   local category
   local pkgdir
   local pn
@@ -78,9 +78,9 @@ copy_if_present /etc/python-exec "$tmpdir/etc/python-exec"
 copy_if_present /etc/java-config-2 "$tmpdir/etc/java-config-2"
 copy_if_present /etc/locale.gen "$tmpdir/etc/locale.gen"
 copy_if_present /usr/src/linux "$tmpdir/usr/src/linux"
-binhost_package_atoms >"$packages_file"
+binhost_package_entries >"$packages_file"
 if [[ ! -s "$packages_file" ]]; then
-  printf '[export-target] error: no binhost package atoms found in %s\n' "$PACKAGE_DB" >&2
+  printf '[export-target] error: no binhost package entries found in %s\n' "$PACKAGE_DB" >&2
   exit 1
 fi
 
@@ -92,4 +92,4 @@ tar -C "$tmpdir" -cf "$out_file" .
 
 printf '[export-target] wrote %s\n' "$out_file" >&2
 printf '[export-target] wrote %s\n' "$packages_file" >&2
-printf '[export-target] captured %s binhost package atom(s)\n' "$(wc -l <"$packages_file")" >&2
+printf '[export-target] captured %s binhost package entries\n' "$(wc -l <"$packages_file")" >&2

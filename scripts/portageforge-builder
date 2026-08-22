@@ -9,6 +9,7 @@ DATA_SHARE_TAG=portageforge-data
 DATA_ROOT=/mnt/portageforge-data
 TARGET_DATA_ROOT="$DATA_ROOT/targets"
 PORTAGE_TMPDIR_ROOT=/var/tmp/portageforge/targets
+TARGET_PACKAGE_SET=/etc/portage/sets/portageforge-binhost-packages
 BINHOST_PORT=8080
 CPU_COUNT=$(nproc 2>/dev/null || printf '1')
 HTTP_PID=
@@ -42,15 +43,12 @@ list_target_archives() {
 # Mount the target-input directory shared by QEMU.
 prepare_targets_share() {
   mkdir -p "$TARGETS_MOUNT"
-  if ! mountpoint -q "$TARGETS_MOUNT"; then
-    if ! mount -t 9p -o trans=virtio,version=9p2000.L,ro "$TARGETS_SHARE_TAG" "$TARGETS_MOUNT"; then
-      printf '[portageforge] error: could not mount targets share tag %s at %s\n' "$TARGETS_SHARE_TAG" "$TARGETS_MOUNT" >&2
-      exit 1
-    fi
+  if mountpoint -q "$TARGETS_MOUNT"; then
+    return
   fi
 
-  if [[ ! -d "$TARGETS_MOUNT" ]]; then
-    printf '[portageforge] error: shared targets directory not found: %s\n' "$TARGETS_MOUNT" >&2
+  if ! mount -t 9p -o trans=virtio,version=9p2000.L,ro "$TARGETS_SHARE_TAG" "$TARGETS_MOUNT"; then
+    printf '[portageforge] error: could not mount targets share tag %s at %s\n' "$TARGETS_SHARE_TAG" "$TARGETS_MOUNT" >&2
     exit 1
   fi
 }
@@ -139,9 +137,9 @@ prepare_builder_from_snapshot() {
   cp -a "$TARGET_ROOT/etc/portage" /etc/portage
   rm -rf /etc/portage/make.profile
   mkdir -p /etc/portage/sets
-  awk 'NF && $1 !~ /^#/ { print }' "$package_list" | sort -u >/etc/portage/sets/portageforge-binhost-packages
-  if [[ ! -s /etc/portage/sets/portageforge-binhost-packages ]]; then
-    printf '[portageforge] error: target package list has no package atoms: %s\n' "$package_list" >&2
+  awk 'NF && $1 !~ /^#/ { print $1 }' "$package_list" | sort -u >"$TARGET_PACKAGE_SET"
+  if [[ ! -s "$TARGET_PACKAGE_SET" ]]; then
+    printf '[portageforge] error: target package list has no package entries: %s\n' "$package_list" >&2
     exit 1
   fi
 
@@ -159,25 +157,50 @@ prepare_builder_from_snapshot() {
 
   printf '[portageforge] target binhost path: /targets/%s/binpkgs/\n' "$TARGET_NAME"
   printf '[portageforge] using %s build job(s)\n' "$BUILD_JOBS"
-  printf '[portageforge] loaded %s binhost package atom(s)\n' "$(wc -l </etc/portage/sets/portageforge-binhost-packages)"
-  load_requested_packages
+  printf '[portageforge] loaded %s binhost package entries\n' "$(wc -l <"$TARGET_PACKAGE_SET")"
 }
 
-# Load shared build requests that are not yet in the exported binhost package set.
-load_requested_packages() {
-  local request_set=/etc/portage/sets/portageforge-requested
-  local request_file="$TARGETS_MOUNT/requested-packages"
+# List package names currently installed in the builder VM root.
+installed_root_package_names() {
+  local category
+  local pkgdir
+  local pn
+  local pnvr
 
-  mkdir -p /etc/portage/sets
-  rm -f "$request_set"
+  for pkgdir in /var/db/pkg/*/*; do
+    [[ -d "$pkgdir" ]] || continue
+    category=${pkgdir%/*}
+    category=${category##*/}
+    pnvr=${pkgdir##*/}
+    pn=${pnvr%-[0-9]*}
+    printf '%s/%s\n' "$category" "$pn"
+  done | sort -u
+}
 
-  if [[ -s "$request_file" ]]; then
-    awk 'NF && $1 !~ /^#/ { print }' "$request_file" | sort -u >"$request_set"
-    if [[ -s "$request_set" ]]; then
-      printf '[portageforge] loaded %s requested package atom(s)\n' "$(wc -l <"$request_set")"
-    else
-      rm -f "$request_set"
-    fi
+# Install build-time dependencies that are private to the builder VM.
+install_private_build_dependencies() {
+  local private_installed_packages=$1
+  shift
+  local targets=("$@")
+
+  mkdir -p "$PORTAGE_TMPDIR_PATH"
+
+  printf '[portageforge] resolving private builder build-time dependencies\n'
+  emerge \
+    --usepkg=n \
+    --getbinpkg=n \
+    --oneshot \
+    --ignore-world=y \
+    --onlydeps \
+    --onlydeps-with-rdeps=n \
+    --with-bdeps=y \
+    --buildpkg=n \
+    --jobs="$BUILD_JOBS" \
+    "${targets[@]}"
+
+  installed_root_package_names | comm -23 - "$TARGET_PACKAGE_SET" >"$private_installed_packages"
+  if [[ -s "$private_installed_packages" ]]; then
+    printf '[portageforge] excluding %s private builder package(s) from binpkg output\n' "$(wc -l <"$private_installed_packages")"
   fi
 }
 
@@ -217,20 +240,26 @@ restore_target_environment_state() {
   fi
 }
 
-# Build current source packages from the binhost package and request sets.
+# Build current source packages from the target package set.
 emerge_target_packages() {
   local emerge_args=(
     --usepkg=n
     --getbinpkg=n
+    --oneshot
+    --ignore-world=y
     --with-bdeps=y
     --buildpkg=y
     --jobs="$BUILD_JOBS"
   )
+  local buildpkg_exclude
+  local private_buildpkg_excludes_file="$PORTAGE_TMPDIR_PATH/private-buildpkg-excludes"
   local targets=(@portageforge-binhost-packages)
 
   restore_target_environment_state
-  if [[ -s /etc/portage/sets/portageforge-requested ]]; then
-    targets+=(@portageforge-requested)
+  install_private_build_dependencies "$private_buildpkg_excludes_file" "${targets[@]}"
+  if [[ -s "$private_buildpkg_excludes_file" ]]; then
+    buildpkg_exclude=$(paste -sd ' ' "$private_buildpkg_excludes_file")
+    emerge_args+=("--buildpkg-exclude=$buildpkg_exclude")
   fi
 
   if [[ -n "$(find "$PKGDIR_PATH" -type f ! -name Packages -print -quit 2>/dev/null)" ]]; then
