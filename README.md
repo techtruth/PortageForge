@@ -285,11 +285,10 @@ the worst bootstrap loops. The second pass restores the full target Portage
 config and runs with `--newuse`, so private build tools are rebuilt or updated
 for the target's USE policy before the final package build.
 
-When Portage reports a first-pass circular dependency and suggests a temporary
-`Change USE:` break, PortageForge applies that suggestion only while resolving
-private bootstrap dependencies. It restores the target Portage config before the
-final `--buildpkgonly` pass, so emitted binpkgs use the target's normal profile
-and USE configuration.
+If Portage reports that USE changes are necessary to proceed, including
+circular-dependency `Change USE:` suggestions, PortageForge fails the build
+instead of applying temporary package.use changes. Adjust the target Portage
+policy, re-export the target state, and run the builder again.
 
 ## Target Setup
 
