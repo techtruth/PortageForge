@@ -63,6 +63,118 @@ copy_if_present() {
   fi
 }
 
+write_package_list() {
+  local destination=$1
+  local entry
+  local repository
+
+  {
+    printf '# PortageForge target package list\n'
+    printf '# Repositories:\n'
+    for repository in "${REPOSITORIES[@]}"; do
+      if [[ "$repository" == gentoo ]]; then
+        printf '# - %s (active)\n' "$repository"
+      else
+        printf '# - %s (commented out)\n' "$repository"
+      fi
+    done
+    printf '\n'
+
+    for entry in "${PACKAGE_ENTRIES[@]}"; do
+      if [[ "$entry" == *::gentoo ]]; then
+        printf '%s\n' "$entry"
+      else
+        printf '# %s\n' "$entry"
+      fi
+    done
+  } >"$destination"
+}
+
+load_package_entries() {
+  local entries_output
+  local entry
+  local repository
+  declare -A seen_repositories=()
+
+  if ! entries_output=$(binhost_package_entries); then
+    exit 1
+  fi
+  if [[ -z "$entries_output" ]]; then
+    printf '[export-target] error: no binhost package entries found in %s\n' "$PACKAGE_DB" >&2
+    exit 1
+  fi
+
+  mapfile -t PACKAGE_ENTRIES <<<"$entries_output"
+  for entry in "${PACKAGE_ENTRIES[@]}"; do
+    [[ -n "$entry" ]] || continue
+    repository=${entry##*::}
+    if [[ -z "${seen_repositories[$repository]+set}" ]]; then
+      REPOSITORIES+=("$repository")
+      seen_repositories[$repository]=1
+    fi
+    if [[ "$repository" == gentoo ]]; then
+      ACTIVE_PACKAGES+=("$entry")
+    fi
+  done
+
+  mapfile -t REPOSITORIES < <(printf '%s\n' "${REPOSITORIES[@]}" | sort -u)
+}
+
+run_resolver_check() {
+  local label=$1
+  local output_file="$tmpdir/resolver-$label.log"
+  shift
+
+  printf '[export-target] validating resolver graph: %s\n' "$label" >&2
+  if "$@" >"$output_file" 2>&1; then
+    printf '[export-target] validation passed: %s\n' "$label" >&2
+    return 0
+  fi
+
+  cat "$output_file" >&2
+  printf '[export-target] error: resolver validation failed: %s\n' "$label" >&2
+  printf '[export-target] error: no target snapshot or package list was exported\n' >&2
+  return 1
+}
+
+validate_package_graph() {
+  if ! command -v emerge >/dev/null 2>&1; then
+    printf '[export-target] error: emerge not found\n' >&2
+    exit 1
+  fi
+
+  if [[ "${#ACTIVE_PACKAGES[@]}" -eq 0 ]]; then
+    printf '[export-target] error: no active ::gentoo package entries to validate\n' >&2
+    exit 1
+  fi
+
+  run_resolver_check \
+    target-private-dependencies \
+    emerge \
+      --pretend \
+      --usepkg=n \
+      --getbinpkg=n \
+      --oneshot \
+      --ignore-world=y \
+      --with-bdeps=y \
+      --onlydeps \
+      --onlydeps-with-rdeps=n \
+      --emptytree \
+      "${ACTIVE_PACKAGES[@]}"
+
+  run_resolver_check \
+    target-final \
+    emerge \
+      --pretend \
+      --usepkg=n \
+      --getbinpkg=n \
+      --oneshot \
+      --ignore-world=y \
+      --with-bdeps=y \
+      --emptytree \
+      "${ACTIVE_PACKAGES[@]}"
+}
+
 if [[ ! -f "$PORTAGE_DIR/make.conf" ]]; then
   printf '[export-target] error: make.conf not found: %s\n' "$PORTAGE_DIR/make.conf" >&2
   exit 1
@@ -88,47 +200,36 @@ tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 active_entries=0
 commented_entries=0
-entries_file="$tmpdir/package-entries"
-repositories_file="$tmpdir/repositories"
+snapshot_dir="$tmpdir/snapshot"
+PACKAGE_ENTRIES=()
+ACTIVE_PACKAGES=()
+REPOSITORIES=()
 
-mkdir -p "$tmpdir/etc" "$tmpdir/metadata"
-cp -a "$PORTAGE_DIR" "$tmpdir/etc/portage"
-rm -f "$tmpdir/etc/portage/sets/portageforge-binhost-packages"
-copy_if_present /etc/env.d "$tmpdir/etc/env.d"
-copy_if_present /etc/eselect "$tmpdir/etc/eselect"
-copy_if_present /etc/python-exec "$tmpdir/etc/python-exec"
-copy_if_present /etc/java-config-2 "$tmpdir/etc/java-config-2"
-copy_if_present /etc/locale.gen "$tmpdir/etc/locale.gen"
-copy_if_present /etc/locale.conf "$tmpdir/etc/locale.conf"
-copy_if_present /usr/src/linux "$tmpdir/usr/src/linux"
-rm -rf "$packages_file"
-binhost_package_entries >"$entries_file"
-if [[ ! -s "$entries_file" ]]; then
-  printf '[export-target] error: no binhost package entries found in %s\n' "$PACKAGE_DB" >&2
+mkdir -p "$snapshot_dir/etc" "$snapshot_dir/metadata"
+cp -a "$PORTAGE_DIR" "$snapshot_dir/etc/portage"
+rm -f "$snapshot_dir/etc/portage/sets/portageforge-binhost-packages"
+copy_if_present /etc/env.d "$snapshot_dir/etc/env.d"
+copy_if_present /etc/eselect "$snapshot_dir/etc/eselect"
+copy_if_present /etc/python-exec "$snapshot_dir/etc/python-exec"
+copy_if_present /etc/java-config-2 "$snapshot_dir/etc/java-config-2"
+copy_if_present /etc/locale.gen "$snapshot_dir/etc/locale.gen"
+copy_if_present /etc/locale.conf "$snapshot_dir/etc/locale.conf"
+copy_if_present /usr/src/linux "$snapshot_dir/usr/src/linux"
+load_package_entries
+active_entries=${#ACTIVE_PACKAGES[@]}
+commented_entries=$((${#PACKAGE_ENTRIES[@]} - active_entries))
+if [[ "$active_entries" -eq 0 ]]; then
+  printf '[export-target] error: no active ::gentoo package entries found in %s\n' "$PACKAGE_DB" >&2
   exit 1
 fi
-active_entries=$(awk '$0 ~ /::gentoo$/ { count++ } END { print count + 0 }' "$entries_file")
-commented_entries=$(awk '$0 !~ /::gentoo$/ { count++ } END { print count + 0 }' "$entries_file")
-sed -n 's/^.*:://p' "$entries_file" | sort -u >"$repositories_file"
-{
-  printf '# PortageForge target package list\n'
-  printf '# Repositories:\n'
-  while IFS= read -r repository; do
-    if [[ "$repository" == gentoo ]]; then
-      printf '# - %s (active)\n' "$repository"
-    else
-      printf '# - %s (commented out)\n' "$repository"
-    fi
-  done <"$repositories_file"
-  printf '\n'
-  awk '{ if ($0 ~ /::gentoo$/) print; else print "# " $0 }' "$entries_file"
-} >"$packages_file"
+validate_package_graph
 
-printf '%s\n' "$target_hostname" >"$tmpdir/metadata/hostname"
-printf '%s\n' "$profile" >"$tmpdir/metadata/profile"
-date -u '+%Y-%m-%dT%H:%M:%SZ' >"$tmpdir/metadata/exported-at"
+printf '%s\n' "$target_hostname" >"$snapshot_dir/metadata/hostname"
+printf '%s\n' "$profile" >"$snapshot_dir/metadata/profile"
+date -u '+%Y-%m-%dT%H:%M:%SZ' >"$snapshot_dir/metadata/exported-at"
 
-tar -C "$tmpdir" -cf "$out_file" .
+write_package_list "$packages_file"
+tar -C "$snapshot_dir" -cf "$out_file" .
 
 printf '[export-target] wrote %s\n' "$out_file" >&2
 printf '[export-target] wrote %s\n' "$packages_file" >&2

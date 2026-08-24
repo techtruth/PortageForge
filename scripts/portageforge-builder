@@ -304,17 +304,6 @@ write_target_make_conf() {
   } >"$TARGET_CHROOT_PATH/etc/portage/make.conf"
 }
 
-# Write target make.conf without target USE= overrides for the first bootstrap.
-write_default_use_make_conf() {
-  {
-    awk '
-      /^[[:space:]]*(export[[:space:]]+)?USE[[:space:]]*=/ { next }
-      { print }
-    ' "$TARGET_ROOT/etc/portage/make.conf"
-    builder_make_conf_settings
-  } >"$TARGET_CHROOT_PATH/etc/portage/make.conf"
-}
-
 # Copy the exported target Portage tree into the chroot and refresh the set.
 copy_target_portage_snapshot() {
   rm -rf "$TARGET_CHROOT_PATH/etc/portage"
@@ -333,16 +322,6 @@ apply_target_portage_config() {
   printf '[portageforge] applying target /etc/portage snapshot to chroot\n'
   copy_target_portage_snapshot
   write_target_make_conf
-}
-
-# Apply target policy with target USE overrides disabled for stable bootstrapping.
-apply_default_use_bootstrap_config() {
-  printf '[portageforge] applying default-USE bootstrap Portage config\n'
-  copy_target_portage_snapshot
-  rm -rf \
-    "$TARGET_CHROOT_PATH/etc/portage/package.use" \
-    "$TARGET_CHROOT_PATH/etc/portage/package.env"
-  write_default_use_make_conf
 }
 
 # Refresh the chroot environment after changing profile or Portage config.
@@ -502,15 +481,9 @@ install_private_build_dependencies() {
 
   mkdir -p "$PORTAGE_TMPDIR_PATH"
 
-  apply_default_use_bootstrap_config
-  refresh_chroot_environment
-  if ! resolve_private_build_dependencies default-use-bootstrap missing "${targets[@]}"; then
-    return 1
-  fi
-
   apply_target_portage_config
   refresh_chroot_environment
-  if ! resolve_private_build_dependencies target-use-bootstrap update "${targets[@]}"; then
+  if ! resolve_private_build_dependencies target-private-dependencies update "${targets[@]}"; then
     return 1
   fi
 

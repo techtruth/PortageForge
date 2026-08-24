@@ -51,6 +51,13 @@ The `*.tar` file contains target configuration/state. The `*.packages` sidecar
 contains repo-qualified package entries derived from the target's installed
 package database. The VM reads `vm/targets/` through a read-only QEMU 9p share.
 
+Before writing those files, `make export-target-state` runs read-only
+`emerge --pretend` resolver checks against the generated `::gentoo` package
+list. It validates the target-policy private dependency graph and the target's
+final full package graph. If Portage reports unsatisfied USE policy,
+`REQUIRED_USE`, masks, keywords, or dependency constraints, export fails without
+replacing the previous target files.
+
 The snapshot contains:
 
 ```text
@@ -258,8 +265,7 @@ for each /mnt/portageforge-targets/*.tar:
   set the target Gentoo profile before sync when the repo tree already exists
   run emerge --sync inside the chroot
   set the target Gentoo profile inside the chroot after sync
-  install missing private build-time dependencies with target USE overrides disabled
-  restore target config and update private build-time dependencies with --newuse
+  install/update private build-time dependencies with the target Portage policy
   build binary packages for @portageforge-binhost-packages inside the chroot
   run emaint binhost --fix inside the chroot
   unmount the chroot runtime paths
@@ -277,13 +283,11 @@ or `amd64-nomultilib-systemd` from the exported profile name.
 
 Some source packages need bootstrap providers or other build-only tools before
 the source package can be built. PortageForge does not keep a hardcoded
-bootstrap package map. Instead, it asks Portage to install private build-time
-dependencies in two passes before any served binpkgs are emitted. The first pass
-uses the target profile and package policy, but disables target `USE=`,
-`package.use`, and `package.env` overrides so a default-USE tool stack can break
-the worst bootstrap loops. The second pass restores the full target Portage
-config and runs with `--newuse`, so private build tools are rebuilt or updated
-for the target's USE policy before the final package build.
+bootstrap package map. Instead, it asks Portage to install or update private
+build-time dependencies under the target Portage policy before any served
+binpkgs are emitted. That dependency pass runs with `--newuse`, so private build
+tools are rebuilt or updated for the target's USE policy before the final
+package build.
 
 If Portage reports that USE changes are necessary to proceed, including
 circular-dependency `Change USE:` suggestions, PortageForge fails the build
