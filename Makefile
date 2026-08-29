@@ -12,7 +12,7 @@ help:
 	@printf '%s\n' '  make setup                         Prepare images/ and vm/ directories'
 	@printf '%s\n' '  make setup SSH_PUBLIC_KEY=key.pub  Prepare using a specific SSH public key'
 	@printf '%s\n' '  make setup ROOT_PASSWORD=secret    Prepare with a root console/SSH password'
-	@printf '%s\n' '  make run                           Boot the QEMU builder VM'
+	@printf '%s\n' '  make run                           Boot the QEMU true-cross builder VM'
 	@printf '%s\n' '  make export-target-state           Export target state on a Gentoo client'
 	@printf '%s\n' '  make check                         Syntax-check project shell scripts'
 	@printf '%s\n' '  make pristine                      Remove generated VM/build state'

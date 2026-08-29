@@ -14,6 +14,57 @@ profile_name() {
   eselect profile show 2>/dev/null | awk '/^  / { print $1; exit }'
 }
 
+portage_envvar() {
+  local variable_name=$1
+
+  if ! command -v portageq >/dev/null 2>&1; then
+    printf '[export-target] error: portageq not found\n' >&2
+    exit 1
+  fi
+
+  portageq envvar "$variable_name" 2>/dev/null || true
+}
+
+validate_explicit_target_flags() {
+  local failed=0
+  local path
+  local value
+  local variable_name
+
+  for variable_name in COMMON_FLAGS CFLAGS CXXFLAGS FCFLAGS FFLAGS; do
+    value=$(portage_envvar "$variable_name")
+    if [[ "$value" =~ (^|[[:space:]])-m(arch|tune)=native([[:space:]]|$) ]]; then
+      printf '[export-target] error: %s contains native CPU flags: %s\n' "$variable_name" "$value" >&2
+      failed=1
+    fi
+  done
+
+  for path in "$PORTAGE_DIR/make.conf" "$PORTAGE_DIR/env"; do
+    [[ -e "$path" ]] || continue
+    if grep -R -n -E -- '(^|[[:space:]])-m(arch|tune)=native([[:space:]]|$)' "$path" >&2; then
+      failed=1
+    fi
+  done
+
+  if [[ "$failed" -ne 0 ]]; then
+    printf '[export-target] error: PortageForge true-cross snapshots require explicit target flags such as -march=znver4\n' >&2
+    exit 1
+  fi
+}
+
+validate_profile_name() {
+  local profile=$1
+
+  if [[ -z "$profile" || "$profile" == /* || "$profile" == .. || "$profile" == ../* || "$profile" == */../* || "$profile" == */.. ]]; then
+    printf '[export-target] error: active profile path is unsafe: %s\n' "$profile" >&2
+    exit 1
+  fi
+  if [[ ! "$profile" =~ ^[A-Za-z0-9._+/-]+$ ]]; then
+    printf '[export-target] error: active profile has unsupported characters: %s\n' "$profile" >&2
+    exit 1
+  fi
+}
+
 safe_name() {
   local name=$1
 
@@ -190,6 +241,17 @@ if [[ -z "$profile" ]]; then
   printf '[export-target] error: could not determine active Gentoo profile\n' >&2
   exit 1
 fi
+validate_profile_name "$profile"
+target_chost=$(portage_envvar CHOST)
+if [[ -z "$target_chost" ]]; then
+  printf '[export-target] error: could not determine target CHOST\n' >&2
+  exit 1
+fi
+if [[ ! "$target_chost" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  printf '[export-target] error: invalid target CHOST: %s\n' "$target_chost" >&2
+  exit 1
+fi
+validate_explicit_target_flags
 
 target_hostname=$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'target')
 target_hostname=$(safe_name "$target_hostname")
@@ -226,6 +288,7 @@ validate_package_graph
 
 printf '%s\n' "$target_hostname" >"$snapshot_dir/metadata/hostname"
 printf '%s\n' "$profile" >"$snapshot_dir/metadata/profile"
+printf '%s\n' "$target_chost" >"$snapshot_dir/metadata/chost"
 date -u '+%Y-%m-%dT%H:%M:%SZ' >"$snapshot_dir/metadata/exported-at"
 
 write_package_list "$packages_file"

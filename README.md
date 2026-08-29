@@ -1,36 +1,90 @@
 # PortageForge
 
-PortageForge builds Gentoo binary packages for target machines inside a QEMU
-TCG Gentoo VM. The VM creates a persistent Gentoo chroot for each target,
-applies that target's Portage policy and target CPU flags inside the chroot,
-then serves the resulting binhosts itself over HTTP.
+PortageForge builds Gentoo binary packages for target machines using a
+true-cross build model. The target keeps its normal Gentoo `CHOST`, while the
+builder uses a deliberately different `CBUILD` identity so Portage and upstream
+build systems take the cross-compilation paths.
 
 ```text
-target Gentoo machines
-  export hostname-named target snapshots and package lists
+builder VM
+  CBUILD=x86_64-portageforge-linux-gnu
+  runs Portage, shell, Python, GCC, pkg-config, CMake, Ninja, etc.
+  never executes target-optimized package binaries
 
-QEMU TCG Gentoo VM
-  creates one persistent Gentoo chroot per target
-  runs emerge --sync inside each target chroot
-  builds @portageforge-binhost-packages inside each target chroot
-  runs emaint binhost --fix inside each target chroot
-  writes each target's binpkgs/distfiles to a host shared directory
-  serves the target binhost directories on port 8080
+target sysroot
+  CHOST=x86_64-pc-linux-gnu
+  uses the target machine's /etc/portage policy and CPU flags
+  receives target headers, libraries, package database, and merge state
 
 target Gentoo machines
-  install optimized binary packages from their VM binhost paths
+  install normalized x86_64-pc-linux-gnu binpkgs from PortageForge
 ```
 
-## Why QEMU
+This is meant for the hard case where the physical builder, container host, or
+QEMU CPU cannot execute the target's CPU instructions. For example, the builder
+can be unable to run `-march=znver4` binaries while still compiling binpkgs that
+the Zen 4 target will run later.
 
-A normal container cannot safely build `-march=znver4` packages on a host CPU
-that cannot execute `znver4` binaries. The builder eventually runs programs it
-has built, such as Python, GCC helpers, build tools, tests, and generated
-utilities.
+PortageForge is deliberately scoped to microarchitecture-only builds. The
+builder's native GCC target, reported by `gcc -dumpmachine`, must match the
+target snapshot's `CHOST`. The fake builder `CBUILD` may only change the
+vendor/name field, such as:
 
-QEMU TCG gives the build environment an emulated CPU instead of the host CPU.
-That makes the VM the correct place to run the target-optimized Gentoo system.
-It is much slower than native hardware, but it keeps the model honest.
+```text
+native GCC target: x86_64-pc-linux-gnu
+builder CBUILD:    x86_64-portageforge-linux-gnu
+target CHOST:      x86_64-pc-linux-gnu
+```
+
+If the target changes architecture, ABI, libc, or OS tuple, PortageForge stops
+early instead of pretending the wrapper model is a real cross toolchain.
+
+## Build Model
+
+PortageForge does not chroot into the target root. It runs `emerge` from the
+builder root with:
+
+```text
+CBUILD=x86_64-portageforge-linux-gnu
+CHOST=<target CHOST, usually x86_64-pc-linux-gnu>
+ROOT=<target sysroot>
+SYSROOT=<target sysroot>
+PORTAGE_CONFIGROOT=<target sysroot>
+```
+
+The builder creates two wrapper toolchain views:
+
+```text
+x86_64-portageforge-linux-gnu-gcc
+  builder-side compiler name
+  runs on the builder
+  uses builder-safe flags
+
+x86_64-pc-linux-gnu-gcc
+  target-side compiler name
+  runs on the builder
+  passes --sysroot=<target sysroot>
+  receives the target's explicit CFLAGS/CXXFLAGS from make.conf
+```
+
+That makes cross-aware ebuilds do the important split:
+
+```text
+build helper binaries -> CBUILD wrappers, builder-safe
+installed package code -> CHOST wrappers, target-optimized
+```
+
+The target `CHOST` stays normal, so target machines do not need a custom
+`ACCEPT_CHOSTS` just to consume the binhost.
+
+On startup, the builder verifies that the builder root has native toolchain
+basics such as `gcc`, `g++`, `make`, and binutils. If they are missing, it asks
+Portage to install them as builder-native packages before any target build
+starts.
+
+After repository sync, the builder runs wrapper probes before starting package
+builds. Builder-side probes are compiled and executed. Target-side probes are
+compiled only, using the target `CFLAGS` and `CXXFLAGS`.
 
 ## Target Snapshot
 
@@ -47,22 +101,12 @@ vm/targets/<target-hostname>.tar
 vm/targets/<target-hostname>.packages
 ```
 
-The `*.tar` file contains target configuration/state. The `*.packages` sidecar
-contains repo-qualified package entries derived from the target's installed
-package database. The VM reads `vm/targets/` through a read-only QEMU 9p share.
-
-Before writing those files, `make export-target-state` runs read-only
-`emerge --pretend` resolver checks against the generated `::gentoo` package
-list. It validates the target-policy private dependency graph and the target's
-final full package graph. If Portage reports unsatisfied USE policy,
-`REQUIRED_USE`, masks, keywords, or dependency constraints, export fails without
-replacing the previous target files.
-
-The snapshot contains:
+The snapshot tar contains:
 
 ```text
 metadata/hostname
 metadata/profile
+metadata/chost
 metadata/exported-at
 etc/env.d/                      # when present
 etc/eselect/                    # when present
@@ -74,27 +118,20 @@ etc/portage/
 usr/src/linux                   # when present
 ```
 
-The primary build target is stored outside the tar:
+The package sidecar contains repo-qualified package entries derived from the
+target's installed package database, such as `category/package::gentoo`.
+`::gentoo` package entries are active by default; non-`::gentoo` entries are
+preserved but commented out. To build additional packages for a target, add or
+uncomment repo-qualified entries in that target's `*.packages` file.
 
-```text
-vm/targets/<target-hostname>.packages
+True-cross snapshots reject `-march=native` and `-mtune=native`. Use explicit
+target flags instead:
+
+```conf
+COMMON_FLAGS="-O2 -pipe -march=znver4 -mtune=znver4"
+CFLAGS="${COMMON_FLAGS}"
+CXXFLAGS="${COMMON_FLAGS}"
 ```
-
-Each line is a plain package name plus the source repository recorded in the
-target's installed package database, such as `category/package::gentoo` or
-`category/package::pentoo`. The exported file starts with comment lines listing
-the repositories found in the package database. `::gentoo` package entries are
-active by default; non-`::gentoo` entries are preserved but commented out. The
-builder ignores comments and copies active package entries into the
-`@portageforge-binhost-packages` Portage set. Portage then compiles the newest
-visible versions allowed by the target profile, `make.conf`, USE flags, masks,
-keywords, package config, and overlays.
-To build additional packages for a target, add or uncomment repo-qualified
-entries in that target's `*.packages` file.
-
-The snapshot may contain private overlay URLs, package environment files, local
-paths, hostnames, and other machine-specific Portage data. Treat it as private
-host configuration, not as a public artifact.
 
 ## Host Setup
 
@@ -109,19 +146,16 @@ sha256sum
 OVMF firmware at /usr/share/OVMF/OVMF_CODE_4M.fd, or set OVMF_CODE
 ```
 
-Install QEMU with the host OS package manager. The host can be Debian, Gentoo,
-or anything else that can run QEMU.
+QEMU is used as a convenient Gentoo builder appliance. It is not used to run
+target binaries, so the QEMU CPU model does not need to support the target's
+spicy CPU flags.
 
 The Makefile is the normal host interface:
 
 ```sh
 make help
-```
-
-Fetch a ready-to-boot Gentoo cloud-init QCOW2 image:
-
-```sh
 make setup
+make run
 ```
 
 To use a specific SSH public key for the VM root login:
@@ -136,69 +170,54 @@ To set a root password for console login and SSH password login:
 make setup ROOT_PASSWORD='change-me'
 ```
 
-You can provide both:
-
-```sh
-make setup SSH_PUBLIC_KEY=~/.ssh/id_ed25519.pub ROOT_PASSWORD='change-me'
-```
-
 If neither value is provided, setup uses `~/.ssh/id_ed25519.pub` or
 `~/.ssh/id_rsa.pub` when present. Passwords are written into
 `images/cloud-init/user-data` and `images/seed.iso`, so treat those files as
 sensitive.
 
-That gives you:
+This creates:
 
 ```text
-images/portageforge.qcow2   # bootable Gentoo VM image
-images/seed.iso             # first-boot cloud-init bootstrap only
-vm/targets/                 # target snapshots and package lists
-vm/data/targets/            # host-visible per-target binpkgs and distfiles
+images/portageforge.qcow2
+images/seed.iso
+vm/targets/
+vm/data/targets/
 ```
 
-The boot QCOW2 is resized to 300 GiB of virtual capacity so
-`PORTAGE_TMPDIR` has working room. QCOW2 storage is sparse, so the file grows
-as the VM actually writes data.
+The launcher exports `vm/targets/` as read-only and `vm/data/` as writable.
+Re-run `make setup` when you need to recreate the VM disks, change bootstrap
+SSH access, or update the in-VM builder script embedded in `images/seed.iso`.
+Replacing target snapshots or package lists does not require rebuilding the
+seed.
 
-`images/seed.iso` exists because the downloaded Gentoo cloud image expects
-cloud-init data on first boot. PortageForge uses it only to:
+Optional runtime settings can be placed in:
 
 ```text
-install your SSH public key for root and/or set a root password
-write /usr/local/sbin/portageforge-builder into the VM
-write a systemd service for the builder into the VM
-enable sshd and the PortageForge builder service
+vm/data/portageforge-builder.env
 ```
 
-The builder script is embedded into `images/seed.iso` as cloud-init `write_files`
-content and written into the VM at `/usr/local/sbin/portageforge-builder`.
-Its source lives at `scripts/portageforge-builder`; `vm/targets/` is only for
-target input files such as target snapshot tars and package lists.
+Example:
 
-All QEMU host filesystem shares are inside this project's `vm/` directory. The
-launcher exports `vm/targets/` as read-only and `vm/data/` as writable.
-
-Re-run `make setup` when you need to recreate the VM disks, change the
-bootstrap SSH key, change the root password, or update the in-VM
-builder/service scripts embedded in `images/seed.iso`. Replacing target
-snapshots or package lists does not require rebuilding the seed.
-
-The QEMU launcher uses:
-
-```text
--accel tcg,thread=multi
--cpu max
-UEFI/OVMF firmware
-first-boot cloud-init seed ISO for SSH/bootstrap
-read-only vm/targets directory shared into the VM with QEMU 9p
-writable vm/data directory shared into the VM with QEMU 9p mapped-xattr metadata
-host port 2222 -> VM port 22
-host port 8080 -> VM port 8080
+```sh
+PORTAGEFORGE_BUILDER_CHOST=x86_64-portageforge-linux-gnu
+PORTAGEFORGE_BUILDER_COMMON_FLAGS="-O2 -pipe -march=x86-64"
+PORTAGEFORGE_BUILD_JOBS=8
+PORTAGEFORGE_BUILD_INTERVAL_SECONDS=86400
+PORTAGEFORGE_BINHOST_PORT=8080
 ```
 
-`make run` calls `scripts/run-portageforge-builder`, which is only a small
-wrapper around the QEMU command. It uses one fewer vCPU than the host reports, with
-a minimum of one.
+The QEMU launcher also accepts:
+
+```sh
+PORTAGEFORGE_QEMU_ACCEL=kvm
+PORTAGEFORGE_QEMU_CPU=host
+PORTAGEFORGE_MEMORY_MB=16384
+PORTAGEFORGE_HOST_SSH_PORT=2222
+PORTAGEFORGE_HOST_BINHOST_PORT=8080
+```
+
+Using KVM is fine for true-cross mode because target package binaries are not
+executed by the builder.
 
 ## Run The Builder
 
@@ -208,96 +227,48 @@ Boot the prepared VM:
 make run
 ```
 
-Cloud-init handles the in-VM service install on first boot. To watch logs with
-the default QEMU SSH forward:
+Watch logs through the default SSH forward:
 
 ```sh
 ssh -p 2222 root@localhost
 tail -f /var/log/portageforge-builder.log
 ```
 
-If you set `ROOT_PASSWORD`, the QEMU console login is `root` with that password.
-
-On start, `portageforge-builder` mounts `vm/data/` from the host at
-`/mnt/portageforge-data` in the VM. Each target keeps the chroot root on the
-VM's normal qcow2 filesystem and exposes only package artifacts through the host
-share:
-
-```text
-/var/lib/portageforge/targets/<target-hostname>/root/  # persistent Gentoo chroot
-vm/data/targets/<target-hostname>/binpkgs/              # served binary packages
-vm/data/targets/<target-hostname>/distfiles/            # source distfiles
-```
-
-The chroot root and Portage build temp stay inside the VM because package builds
-and tools like `localedef` need normal VM filesystem behavior. Binpkgs and
-distfiles are bind-mounted into the chroot from `vm/data/` so they remain
-host-visible.
-
-The service runs:
-
-```text
-/usr/local/sbin/portageforge-builder
-```
-
-It serves binary packages from per-target URLs:
+The builder serves each target binhost at:
 
 ```text
 http://<qemu-host>:8080/targets/<target-hostname>/binpkgs/
 ```
 
-It repeats the sync/build/index cycle once every 24 hours.
-
 ## Builder Behavior
 
-The VM builder does this on each cycle:
+Each cycle does this:
 
 ```text
 mount host vm/targets at /mnt/portageforge-targets
 mount host vm/data at /mnt/portageforge-data
 for each /mnt/portageforge-targets/*.tar:
-  create or reuse /var/lib/portageforge/targets/<target-hostname>/root from stage3
-  load /mnt/portageforge-targets/<target-hostname>.packages
-  restore target /etc/portage policy into the chroot
-  mount proc/sys/dev/run plus binpkgs/distfiles/temp into the chroot
-  restore target env/eselect/python/java/locale state into the chroot
-  run locale-gen/env-update from restored target config
-  set the target Gentoo profile before sync when the repo tree already exists
-  run emerge --sync inside the chroot
-  set the target Gentoo profile inside the chroot after sync
-  install/update private build-time dependencies with the target Portage policy
-  build binary packages for @portageforge-binhost-packages inside the chroot
-  run emaint binhost --fix inside the chroot
-  unmount the chroot runtime paths
+  validate and load the target snapshot and package list
+  confirm the target CHOST matches the builder GCC target
+  create or reuse /var/lib/portageforge/targets/<target>/sysroot from stage3
+  restore the target /etc/portage policy into that sysroot
+  append PortageForge cross-build settings
+  create CBUILD and CHOST wrapper toolchains
+  run emerge --sync with the target config root
+  compile/run builder wrapper probes and compile target wrapper probes
+  install/update private cross-build dependencies
+  emerge target packages with --buildpkg into the target sysroot
+  run emaint binhost --fix for the target PKGDIR
 serve /mnt/portageforge-data over HTTP
 sleep 24 hours
 ```
 
-The binhost emits modern `.gpkg.tar` binary packages. The legacy `xpak` format
-is not supported by this project.
-
-The first build for a target downloads and verifies a current Gentoo stage3
-tarball, unpacks it into the target chroot, then removes the downloaded tarball.
-The builder chooses `amd64-openrc`, `amd64-systemd`, `amd64-nomultilib-openrc`,
-or `amd64-nomultilib-systemd` from the exported profile name.
-
-Some source packages need bootstrap providers or other build-only tools before
-the source package can be built. PortageForge does not keep a hardcoded
-bootstrap package map. Instead, it asks Portage to install or update private
-build-time dependencies under the target Portage policy before any served
-binpkgs are emitted. That dependency pass runs with `--newuse`, so private build
-tools are rebuilt or updated for the target's USE policy before the final
-package build.
-
-If Portage reports that USE changes are necessary to proceed, including
-circular-dependency `Change USE:` suggestions, PortageForge fails the build
-instead of applying temporary package.use changes. Adjust the target Portage
-policy, re-export the target state, and run the builder again.
+PortageForge emits modern `.gpkg.tar` binary packages. The legacy `xpak` format
+is not supported.
 
 ## Target Setup
 
-On each target Gentoo machine, point binary package downloads at that target's
-QEMU binhost path:
+On each target Gentoo machine:
 
 ```ini
 # /etc/portage/binrepos.conf/portageforge.conf
@@ -316,34 +287,34 @@ FEATURES="${FEATURES} getbinpkg"
 Packages from this project are unsigned by default, so leave
 `binpkg-request-signature` disabled unless you add signing.
 
-## Notes
+## Known Hard Parts
 
-Each target chroot and its target machine should sync against compatible Gentoo
-repository state. This version assumes normal `emerge --sync` behavior on both
-sides. If exact repository matching becomes necessary, the VM can grow a
-repository snapshot service later.
+True-cross builds depend on ebuilds and upstream build systems respecting
+`CBUILD` versus `CHOST`. Packages that try to execute freshly built target
+binaries will fail. That is useful: it exposes the exact packages that need
+patches, cache answers, disabled PGO/tests, or package-specific overrides.
 
-PortageForge does not create a `::gentoo` repository config. It restores the
-target's Portage config and otherwise relies on Portage's normal default
-repository configuration from `/usr/share/portage/config/repos.conf`.
+Expect the first rough edges around:
 
-QEMU TCG is slow. It is the correctness path when the physical build host cannot
-execute the target CPU instructions, but a real target-compatible build machine
-will be much faster.
-
-If the target package set includes kernel/module/EFI packages and `make.conf`
-points at secureboot keys, those keys must exist at the same paths inside the
-target chroot or those packages may fail.
-
-If QEMU does not emulate an instruction exposed by the VM CPU model or generated
-by the target flags, affected packages may fail at build or test time. Start
-with the default `-cpu max`; use `qemu-system-x86_64 -cpu help` to inspect other
-CPU models.
+```text
+sys-devel/gcc
+sys-devel/llvm and clang
+dev-lang/rust
+dev-lang/go
+dev-lang/python
+dev-lang/perl
+dev-lang/ruby
+Qt
+ICU
+protobuf
+Firefox and Chromium-class packages
+packages with PGO or test-heavy build phases
+```
 
 References:
 
-- Gentoo Binary Package Guide: <https://wiki.gentoo.org/wiki/Binary_package_guide>
-- Gentoo binary package handbook notes: <https://wiki.gentoo.org/wiki/Handbook:Parts/Working/Features>
+- Gentoo `CBUILD`/`CHOST` and `BDEPEND`/`DEPEND`: <https://devmanual.gentoo.org/general-concepts/dependencies/>
+- Portage `ROOT`, `SYSROOT`, and `PORTAGE_CONFIGROOT`: <https://dev.gentoo.org/~zmedico/portage/doc/man/emerge.1.html>
+- Portage `ACCEPT_CHOSTS`: <https://dev.gentoo.org/~zmedico/portage/doc/man/make.conf.5.html>
+- Gentoo binary package notes: <https://wiki.gentoo.org/wiki/Handbook:Parts/Working/Features>
 - Gentoo amd64 stage3 autobuilds: <https://distfiles.gentoo.org/releases/amd64/autobuilds/>
-- Portage package sets and repository constraints: <https://dev.gentoo.org/~zmedico/portage/doc/man/portage.5.html>
-- QEMU system emulation: <https://www.qemu.org/docs/master/system/introduction.html>

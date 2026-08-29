@@ -9,10 +9,11 @@ TARGETS_DIR="$VM_DIR/targets"
 DATA_DIR="$VM_DIR/data"
 DISK_IMAGE="$IMAGES_DIR/portageforge.qcow2"
 SEED_ISO="$IMAGES_DIR/seed.iso"
-MEMORY_MB=8192
-CPU_MODEL=max
-SSH_PORT=2222
-BINHOST_PORT=8080
+MEMORY_MB=${PORTAGEFORGE_MEMORY_MB:-8192}
+CPU_MODEL=${PORTAGEFORGE_QEMU_CPU:-max}
+QEMU_ACCEL=${PORTAGEFORGE_QEMU_ACCEL:-tcg,thread=multi}
+SSH_PORT=${PORTAGEFORGE_HOST_SSH_PORT:-2222}
+BINHOST_HOST_PORT=${PORTAGEFORGE_HOST_BINHOST_PORT:-8080}
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 CPU_COUNT=$(nproc 2>/dev/null || printf '1')
 if [[ "$CPU_COUNT" -gt 1 ]]; then
@@ -50,7 +51,7 @@ qemu_args=(
   qemu-system-x86_64
   -name portageforge-builder
   -machine q35
-  -accel tcg,thread=multi
+  -accel "$QEMU_ACCEL"
   -cpu "$CPU_MODEL"
   -smp "$VCPUS"
   -m "$MEMORY_MB"
@@ -60,7 +61,7 @@ qemu_args=(
   -virtfs "local,path=$TARGETS_DIR,mount_tag=portageforge-targets,security_model=none,readonly=on"
   -virtfs "local,path=$DATA_DIR,mount_tag=portageforge-data,security_model=mapped-xattr"
   -device virtio-net-pci,netdev=net0
-  -netdev "user,id=net0,hostfwd=tcp::${SSH_PORT}-:22,hostfwd=tcp::${BINHOST_PORT}-:8080"
+  -netdev "user,id=net0,hostfwd=tcp::${SSH_PORT}-:22,hostfwd=tcp::${BINHOST_HOST_PORT}-:8080"
   -serial mon:stdio
   -display none
   -drive "file=$SEED_ISO,if=ide,media=cdrom,readonly=on"
