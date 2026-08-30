@@ -861,9 +861,21 @@ target_package_names() {
 write_private_sysroot_package_names() {
   local output_file=$1
   local target_package_names_file="$PORTAGE_TMPDIR_PATH/target-package-names"
+  local installed_package_names_file="$PORTAGE_TMPDIR_PATH/installed-package-names"
 
   target_package_names >"$target_package_names_file"
-  installed_sysroot_package_names | comm -23 - "$target_package_names_file" >"$output_file"
+  installed_sysroot_package_names >"$installed_package_names_file"
+  comm -23 "$installed_package_names_file" "$target_package_names_file" >"$output_file"
+}
+
+write_target_sysroot_package_names() {
+  local output_file=$1
+  local target_package_names_file="$PORTAGE_TMPDIR_PATH/target-package-names"
+  local installed_package_names_file="$PORTAGE_TMPDIR_PATH/installed-package-names"
+
+  target_package_names >"$target_package_names_file"
+  installed_sysroot_package_names >"$installed_package_names_file"
+  comm -12 "$installed_package_names_file" "$target_package_names_file" >"$output_file"
 }
 
 installed_sysroot_package_names() {
@@ -880,6 +892,33 @@ installed_sysroot_package_names() {
     pn=$(package_name_from_pf "$pnvr")
     printf '%s/%s\n' "$category" "$pn"
   done | sort -u
+}
+
+update_existing_target_packages() {
+  local target_installed_packages="$PORTAGE_TMPDIR_PATH/target-installed-packages"
+  local target_targets=()
+
+  mkdir -p "$PORTAGE_TMPDIR_PATH"
+  write_target_sysroot_package_names "$target_installed_packages"
+  if [[ ! -s "$target_installed_packages" ]]; then
+    return 0
+  fi
+
+  mapfile -t target_targets <"$target_installed_packages"
+  printf '[portageforge] updating %s existing target sysroot package(s) for current target policy\n' "${#target_targets[@]}"
+  cross_emerge \
+    "${CROSS_RESOLVER_ARGS[@]}" \
+    --usepkg=n \
+    --getbinpkg=n \
+    --oneshot \
+    --ignore-world=y \
+    --with-bdeps=y \
+    --buildpkg \
+    --update \
+    --deep \
+    --newuse \
+    --jobs="$BUILD_JOBS" \
+    "${target_targets[@]}"
 }
 
 update_existing_private_build_dependencies() {
@@ -954,6 +993,11 @@ install_private_build_dependencies() {
   local targets=("$@")
 
   mkdir -p "$PORTAGE_TMPDIR_PATH"
+
+  apply_target_portage_config
+  if ! update_existing_target_packages; then
+    return 1
+  fi
 
   apply_target_portage_config
   if ! update_existing_private_build_dependencies; then
