@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 BUILD_INTERVAL_SECONDS=${PORTAGEFORGE_BUILD_INTERVAL_SECONDS:-86400}
 GENTOO_AUTOBUILDS_URL=${PORTAGEFORGE_GENTOO_AUTOBUILDS_URL:-https://distfiles.gentoo.org/releases/amd64/autobuilds}
+SYNC_ATTEMPTS=${PORTAGEFORGE_SYNC_ATTEMPTS:-3}
+SYNC_RETRY_SECONDS=${PORTAGEFORGE_SYNC_RETRY_SECONDS:-60}
 TARGETS_SHARE_TAG=portageforge-targets
 TARGETS_MOUNT=/mnt/portageforge-targets
 TARGET_ROOT=/var/lib/portageforge/target-snapshot
@@ -55,6 +57,10 @@ is_positive_integer() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
 }
 
+is_nonnegative_integer() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
 is_tcp_port() {
   is_positive_integer "$1" && [[ "$1" -le 65535 ]]
 }
@@ -96,6 +102,8 @@ load_builder_config() {
   fi
 
   BUILD_INTERVAL_SECONDS=${PORTAGEFORGE_BUILD_INTERVAL_SECONDS:-$BUILD_INTERVAL_SECONDS}
+  SYNC_ATTEMPTS=${PORTAGEFORGE_SYNC_ATTEMPTS:-$SYNC_ATTEMPTS}
+  SYNC_RETRY_SECONDS=${PORTAGEFORGE_SYNC_RETRY_SECONDS:-$SYNC_RETRY_SECONDS}
   BINHOST_PORT=${PORTAGEFORGE_BINHOST_PORT:-$BINHOST_PORT}
   BUILDER_CHOST=${PORTAGEFORGE_BUILDER_CHOST:-$BUILDER_CHOST}
   BUILDER_COMMON_FLAGS=${PORTAGEFORGE_BUILDER_COMMON_FLAGS:-$BUILDER_COMMON_FLAGS}
@@ -105,6 +113,14 @@ load_builder_config() {
 validate_builder_config() {
   if ! is_positive_integer "$BUILD_INTERVAL_SECONDS"; then
     printf '[portageforge] error: PORTAGEFORGE_BUILD_INTERVAL_SECONDS must be a positive integer: %s\n' "$BUILD_INTERVAL_SECONDS" >&2
+    exit 1
+  fi
+  if ! is_positive_integer "$SYNC_ATTEMPTS"; then
+    printf '[portageforge] error: PORTAGEFORGE_SYNC_ATTEMPTS must be a positive integer: %s\n' "$SYNC_ATTEMPTS" >&2
+    exit 1
+  fi
+  if ! is_nonnegative_integer "$SYNC_RETRY_SECONDS"; then
+    printf '[portageforge] error: PORTAGEFORGE_SYNC_RETRY_SECONDS must be a non-negative integer: %s\n' "$SYNC_RETRY_SECONDS" >&2
     exit 1
   fi
   if ! is_tcp_port "$BINHOST_PORT"; then
@@ -236,7 +252,7 @@ ensure_builder_runtime() {
     printf '[portageforge] installing builder-native toolchain basics\n'
     if [[ ! -d /var/db/repos/gentoo ]]; then
       printf '[portageforge] syncing builder repository before toolchain bootstrap\n'
-      emerge --sync
+      run_with_sync_retries "builder repository sync" emerge --sync
     fi
     emerge \
       --getbinpkg=y \
@@ -292,6 +308,28 @@ fetch_url() {
     printf '[portageforge] error: curl or wget is required to fetch %s\n' "$url" >&2
     return 1
   fi
+}
+
+run_with_sync_retries() {
+  local attempt
+  local label=$1
+  shift
+
+  for ((attempt = 1; attempt <= SYNC_ATTEMPTS; attempt++)); do
+    if "$@"; then
+      return 0
+    fi
+    if [[ "$attempt" -eq "$SYNC_ATTEMPTS" ]]; then
+      break
+    fi
+    printf '[portageforge] warning: %s failed on attempt %s/%s; retrying in %ss\n' "$label" "$attempt" "$SYNC_ATTEMPTS" "$SYNC_RETRY_SECONDS" >&2
+    if [[ "$SYNC_RETRY_SECONDS" -gt 0 ]]; then
+      sleep "$SYNC_RETRY_SECONDS"
+    fi
+  done
+
+  printf '[portageforge] error: %s failed after %s attempt(s)\n' "$label" "$SYNC_ATTEMPTS" >&2
+  return 1
 }
 
 stage3_variant_for_profile() {
@@ -1145,7 +1183,7 @@ build_target() {
   prepare_builder_from_snapshot "$archive"
 
   printf '[portageforge] syncing repositories for %s\n' "$TARGET_NAME"
-  if ! cross_emerge --sync; then
+  if ! run_with_sync_retries "target repository sync for $TARGET_NAME" cross_emerge --sync; then
     printf '[portageforge] error: repository sync failed for %s\n' "$TARGET_NAME" >&2
     result=1
   fi
