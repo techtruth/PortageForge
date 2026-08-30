@@ -251,6 +251,7 @@ for each /mnt/portageforge-targets/*.tar:
   validate and load the target snapshot and package list
   confirm the target CHOST matches the builder GCC target
   create or reuse /var/lib/portageforge/targets/<target>/sysroot from stage3
+  prepare binpkg, distfiles, and Portage temp directories for the portage user
   restore the target /etc/portage policy into that sysroot
   append PortageForge cross-build settings
   create CBUILD and CHOST wrapper toolchains
@@ -273,6 +274,10 @@ dependencies before resolving new ones. Cross-build resolver calls request
 changed-use, changed-deps, and changed-slot rebuilds, while disabling
 complete-graph preservation that would otherwise keep stale private build
 dependencies in the graph.
+
+`PKGDIR`, `DISTDIR`, and `PORTAGE_TMPDIR` are prepared as writable directories
+for the VM's `portage` user before each target build. This matters because
+Portage fetch/build workers do not always run as root.
 
 ## Target Setup
 

@@ -153,6 +153,32 @@ prepare_data_share() {
   mkdir -p "$TARGET_DATA_ROOT" "$TARGET_STATE_ROOT" "$STAGE3_TMPDIR" "$PORTAGE_TMPDIR_ROOT"
 }
 
+prepare_portage_writable_dir() {
+  local group
+  local path=$1
+
+  mkdir -p "$path"
+  if id -u portage >/dev/null 2>&1; then
+    group=$(id -gn portage 2>/dev/null || printf 'portage')
+    if ! chown "portage:$group" "$path"; then
+      printf '[portageforge] error: could not chown %s to portage:%s\n' "$path" "$group" >&2
+      exit 1
+    fi
+  fi
+  if ! chmod 2775 "$path"; then
+    printf '[portageforge] error: could not chmod 2775 %s\n' "$path" >&2
+    exit 1
+  fi
+}
+
+prepare_target_workdirs() {
+  printf '[portageforge] preparing writable Portage work directories\n'
+  mkdir -p "$(dirname "$TARGET_SYSROOT_PATH")"
+  prepare_portage_writable_dir "$PKGDIR_PATH"
+  prepare_portage_writable_dir "$DISTDIR_PATH"
+  prepare_portage_writable_dir "$PORTAGE_TMPDIR_PATH"
+}
+
 ensure_builder_runtime() {
   local missing=0
   local required_command
@@ -994,7 +1020,7 @@ prepare_builder_from_snapshot() {
   PORTAGE_TMPDIR_PATH="$PORTAGE_TMPDIR_ROOT/$TARGET_NAME"
   PKGDIR_PATH="$TARGET_DATA_ROOT/$TARGET_NAME/binpkgs"
   DISTDIR_PATH="$TARGET_DATA_ROOT/$TARGET_NAME/distfiles"
-  mkdir -p "$PKGDIR_PATH" "$DISTDIR_PATH" "$PORTAGE_TMPDIR_PATH" "$(dirname "$TARGET_SYSROOT_PATH")"
+  prepare_target_workdirs
 
   if [[ -d "$TARGET_PACKAGE_LIST" ]]; then
     printf '[portageforge] error: target package path must be a repo-qualified package file, not a directory: %s\n' "$TARGET_PACKAGE_LIST" >&2
