@@ -260,8 +260,7 @@ for each /mnt/portageforge-targets/*.tar:
   create CBUILD and CHOST wrapper toolchains
   run emerge --sync with the target config root
   compile/run builder wrapper probes and compile target wrapper probes
-  update already-installed target-set sysroot packages with binpkg output
-  update already-installed private sysroot packages for current target policy
+  update all already-installed sysroot packages together for current target policy
   install/update private cross-build dependencies
   emerge target packages with --buildpkg into the target sysroot
   run emaint binhost --fix for the target PKGDIR
@@ -274,11 +273,12 @@ is not supported.
 
 The target sysroot is long-lived builder state. PortageForge keeps it aligned
 with the current target policy before resolving new private dependencies. It
-first updates already-installed target-set packages with binpkg output, then
-updates already-installed private build dependencies without binpkg output.
-Cross-build resolver calls request changed-use, changed-deps, and changed-slot
-rebuilds, while disabling complete-graph preservation that would otherwise keep
-stale installed packages in the graph.
+updates already-installed target and private sysroot packages in one resolver
+graph so interpreter, slot, and subslot transitions move together. Private-only
+sysroot packages are excluded from binpkg output during that alignment pass.
+Cross-build resolver calls request changed-use, changed-deps, changed-slot, and
+autounmask backtracking while disabling complete-graph preservation that would
+otherwise keep stale installed packages in the graph.
 
 `PKGDIR`, `DISTDIR`, and `PORTAGE_TMPDIR` are prepared as writable directories
 for the VM's `portage` user before each target build. This matters because
