@@ -74,6 +74,20 @@ safe_name() {
   printf '%s' "${name:-target}"
 }
 
+package_name_from_pf() {
+  local pf=$1
+  local without_build_id
+
+  if [[ "$pf" =~ -[0-9]+$ ]]; then
+    without_build_id=${pf%-[0-9]*}
+    if [[ "$without_build_id" =~ -[0-9] ]]; then
+      pf=$without_build_id
+    fi
+  fi
+
+  printf '%s\n' "${pf%-[0-9]*}"
+}
+
 binhost_package_entries() {
   local category
   local pkgdir
@@ -90,7 +104,7 @@ binhost_package_entries() {
     category=${pkgdir%/*}
     category=${category##*/}
     pnvr=${pkgdir##*/}
-    pn=${pnvr%-[0-9]*}
+    pn=$(package_name_from_pf "$pnvr")
     if [[ ! -s "$pkgdir/repository" ]]; then
       printf '[export-target] error: installed package is missing repository metadata: %s/%s\n' "$category" "$pnvr" >&2
       return 1

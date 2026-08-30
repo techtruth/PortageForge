@@ -256,6 +256,7 @@ for each /mnt/portageforge-targets/*.tar:
   create CBUILD and CHOST wrapper toolchains
   run emerge --sync with the target config root
   compile/run builder wrapper probes and compile target wrapper probes
+  update already-installed private sysroot packages for current target policy
   install/update private cross-build dependencies
   emerge target packages with --buildpkg into the target sysroot
   run emaint binhost --fix for the target PKGDIR
@@ -265,6 +266,13 @@ sleep 24 hours
 
 PortageForge emits modern `.gpkg.tar` binary packages. The legacy `xpak` format
 is not supported.
+
+The target sysroot is long-lived builder state. PortageForge keeps it aligned
+with the current target policy by updating already-installed private build
+dependencies before resolving new ones. Cross-build resolver calls request
+changed-use, changed-deps, and changed-slot rebuilds, while disabling
+complete-graph preservation that would otherwise keep stale private build
+dependencies in the graph.
 
 ## Target Setup
 
@@ -293,6 +301,43 @@ True-cross builds depend on ebuilds and upstream build systems respecting
 `CBUILD` versus `CHOST`. Packages that try to execute freshly built target
 binaries will fail. That is useful: it exposes the exact packages that need
 patches, cache answers, disabled PGO/tests, or package-specific overrides.
+
+If `sys-libs/glibc` fails in `pkg_preinst` with:
+
+```text
+Last-minute run tests with ./ld-linux-x86-64.so.2
+Illegal instruction
+simple run test (/usr/bin/cal) failed
+```
+
+then the builder is still running a native/chroot-style install path, or Portage
+is not seeing a non-empty target `ROOT`. In the true-cross runner, glibc is
+merged into the target sysroot with `--root=<target sysroot>`, so Gentoo's glibc
+preinstall sanity check should not execute the freshly built target loader on
+the builder CPU.
+
+Check the builder log for:
+
+```text
+[portageforge] starting true-cross microarchitecture-only builder
+[portageforge] target Portage tmpdir: /var/tmp/portageforge/targets/<target>
+```
+
+If the build log still uses `/var/tmp/portageforge/portage/...`, recreate the
+VM seed and boot state so the current builder script is actually running:
+
+```sh
+make pristine
+make setup
+make run
+```
+
+If dependency resolution reports multiple package instances in one slot, such
+as an installed private dependency with one USE or `PYTHON_TARGETS` shape and a
+scheduled dependency with another, PortageForge should update that stale sysroot
+package in place. If the conflict survives with the current script, the next
+place to look is the package-specific USE or `PYTHON_TARGETS` constraint shown
+by Portage's verbose conflict output.
 
 Expect the first rough edges around:
 

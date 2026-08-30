@@ -33,6 +33,16 @@ else
   DEFAULT_BUILD_JOBS=1
 fi
 BUILD_JOBS=${PORTAGEFORGE_BUILD_JOBS:-$DEFAULT_BUILD_JOBS}
+CROSS_RESOLVER_ARGS=(
+  --backtrack=100
+  --changed-deps
+  --changed-slot
+  --changed-use
+  --complete-graph=n
+  --complete-graph-if-new-use=n
+  --complete-graph-if-new-ver=n
+  --verbose-conflicts
+)
 
 cleanup() {
   if [[ -n "$HTTP_PID" ]]; then
@@ -152,7 +162,7 @@ ensure_builder_runtime() {
     exit 1
   fi
 
-  for required_command in gcc g++ make ar as ld pkg-config portageq; do
+  for required_command in gcc g++ make ar as ld pkg-config portageq sha256sum; do
     if ! command -v "$required_command" >/dev/null 2>&1; then
       missing=1
     fi
@@ -175,7 +185,7 @@ ensure_builder_runtime() {
       virtual/pkgconfig
   fi
 
-  for required_command in gcc g++ make ar as ld pkg-config portageq; do
+  for required_command in gcc g++ make ar as ld pkg-config portageq sha256sum; do
     if ! command -v "$required_command" >/dev/null 2>&1; then
       printf '[portageforge] error: builder command still missing after bootstrap: %s\n' "$required_command" >&2
       exit 1
@@ -190,6 +200,20 @@ sanitize_target_name() {
   name=${name##-}
   name=${name%%-}
   printf '%s' "${name:-target}"
+}
+
+package_name_from_pf() {
+  local pf=$1
+  local without_build_id
+
+  if [[ "$pf" =~ -[0-9]+$ ]]; then
+    without_build_id=${pf%-[0-9]*}
+    if [[ "$without_build_id" =~ -[0-9] ]]; then
+      pf=$without_build_id
+    fi
+  fi
+
+  printf '%s\n' "${pf%-[0-9]*}"
 }
 
 fetch_url() {
@@ -771,6 +795,14 @@ target_package_names() {
   sed 's/::[A-Za-z0-9._-]\+$//' "$TARGET_SYSROOT_PATH$TARGET_PACKAGE_SET" | sort -u
 }
 
+write_private_sysroot_package_names() {
+  local output_file=$1
+  local target_package_names_file="$PORTAGE_TMPDIR_PATH/target-package-names"
+
+  target_package_names >"$target_package_names_file"
+  installed_sysroot_package_names | comm -23 - "$target_package_names_file" >"$output_file"
+}
+
 installed_sysroot_package_names() {
   local category
   local pkgdir
@@ -782,13 +814,41 @@ installed_sysroot_package_names() {
     category=${pkgdir%/*}
     category=${category##*/}
     pnvr=${pkgdir##*/}
-    pn=${pnvr%-[0-9]*}
+    pn=$(package_name_from_pf "$pnvr")
     printf '%s/%s\n' "$category" "$pn"
   done | sort -u
 }
 
+update_existing_private_build_dependencies() {
+  local private_installed_packages="$PORTAGE_TMPDIR_PATH/private-installed-packages"
+  local private_targets=()
+
+  mkdir -p "$PORTAGE_TMPDIR_PATH"
+  write_private_sysroot_package_names "$private_installed_packages"
+  if [[ ! -s "$private_installed_packages" ]]; then
+    return 0
+  fi
+
+  mapfile -t private_targets <"$private_installed_packages"
+  printf '[portageforge] updating %s existing private sysroot package(s) for current target policy\n' "${#private_targets[@]}"
+  cross_emerge \
+    "${CROSS_RESOLVER_ARGS[@]}" \
+    --usepkg=n \
+    --getbinpkg=n \
+    --oneshot \
+    --ignore-world=y \
+    --with-bdeps=y \
+    --buildpkg=n \
+    --update \
+    --deep \
+    --newuse \
+    --jobs="$BUILD_JOBS" \
+    "${private_targets[@]}"
+}
+
 emerge_private_build_dependencies() {
   local emerge_args=(
+    "${CROSS_RESOLVER_ARGS[@]}"
     --usepkg=n
     --getbinpkg=n
     --oneshot
@@ -828,10 +888,14 @@ resolve_private_build_dependencies() {
 install_private_build_dependencies() {
   local private_installed_packages=$1
   shift
-  local target_package_names_file="$PORTAGE_TMPDIR_PATH/target-package-names"
   local targets=("$@")
 
   mkdir -p "$PORTAGE_TMPDIR_PATH"
+
+  apply_target_portage_config
+  if ! update_existing_private_build_dependencies; then
+    return 1
+  fi
 
   apply_target_portage_config
   if ! resolve_private_build_dependencies target-private-dependencies "${targets[@]}"; then
@@ -840,8 +904,7 @@ install_private_build_dependencies() {
 
   apply_target_portage_config
   create_target_wrappers
-  target_package_names >"$target_package_names_file"
-  installed_sysroot_package_names | comm -23 - "$target_package_names_file" >"$private_installed_packages"
+  write_private_sysroot_package_names "$private_installed_packages"
   if [[ -s "$private_installed_packages" ]]; then
     printf '[portageforge] excluding %s private sysroot package(s) from binpkg output\n' "$(wc -l <"$private_installed_packages")"
   fi
@@ -850,6 +913,7 @@ install_private_build_dependencies() {
 emerge_target_packages() {
   local buildpkg_exclude
   local emerge_args=(
+    "${CROSS_RESOLVER_ARGS[@]}"
     --usepkg=n
     --getbinpkg=n
     --oneshot
@@ -958,6 +1022,7 @@ prepare_builder_from_snapshot() {
   printf '[portageforge] builder CBUILD: %s\n' "$BUILDER_CHOST"
   printf '[portageforge] target CHOST: %s\n' "$TARGET_CHOST"
   printf '[portageforge] target sysroot: %s\n' "$TARGET_SYSROOT_PATH"
+  printf '[portageforge] target Portage tmpdir: %s\n' "$PORTAGE_TMPDIR_PATH"
   printf '[portageforge] target binhost path: /targets/%s/binpkgs/\n' "$TARGET_NAME"
   printf '[portageforge] using %s build job(s)\n' "$BUILD_JOBS"
   printf '[portageforge] loaded %s binhost package entries\n' "$(wc -l <"$TARGET_SYSROOT_PATH$TARGET_PACKAGE_SET")"
@@ -1049,6 +1114,7 @@ prepare_targets_share
 prepare_data_share
 load_builder_config
 validate_builder_config
+printf '[portageforge] starting true-cross microarchitecture-only builder\n'
 ensure_builder_runtime
 start_binhost_server
 while true; do
