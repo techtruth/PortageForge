@@ -332,6 +332,17 @@ make setup
 make run
 ```
 
+If cloud-init logs stop after:
+
+```text
+Running command ['/var/lib/cloud/instance/scripts/runcmd']
+```
+
+then the first-boot bootstrap is stuck before the builder service starts. Make
+sure the generated `portageforge-builder.service` does not include
+`After=cloud-final.service`, then rerun `make setup` so `images/seed.iso`
+contains the fixed unit.
+
 If dependency resolution reports multiple package instances in one slot, such
 as an installed private dependency with one USE or `PYTHON_TARGETS` shape and a
 scheduled dependency with another, PortageForge should update that stale sysroot

@@ -189,7 +189,7 @@ EOF
     content: |
       [Unit]
       Description=PortageForge builder
-      After=cloud-final.service network-online.target sshd.service ssh.service
+      After=network-online.target sshd.service ssh.service
       Wants=network-online.target
 
       [Service]
