@@ -113,8 +113,8 @@ create_seed_iso() {
     exit 1
   fi
 
-  if [[ ! -x "$VM_BUILDER_SCRIPT" ]]; then
-    printf '[setup-portageforge-builder] error: builder script is missing or not executable: %s\n' "$VM_BUILDER_SCRIPT" >&2
+  if [[ ! -r "$VM_BUILDER_SCRIPT" ]]; then
+    printf '[setup-portageforge-builder] error: builder script is missing or not readable: %s\n' "$VM_BUILDER_SCRIPT" >&2
     exit 1
   fi
 

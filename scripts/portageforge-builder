@@ -153,9 +153,21 @@ prepare_data_share() {
   mkdir -p "$TARGET_DATA_ROOT" "$TARGET_STATE_ROOT" "$STAGE3_TMPDIR" "$PORTAGE_TMPDIR_ROOT"
 }
 
+prepare_portage_traversable_dir() {
+  local path=$1
+
+  mkdir -p "$path"
+  if ! chmod a+rx "$path"; then
+    printf '[portageforge] error: could not make %s traversable\n' "$path" >&2
+    exit 1
+  fi
+}
+
 prepare_portage_writable_dir() {
   local group
   local path=$1
+  local test_path
+  local test_path_q
 
   mkdir -p "$path"
   if id -u portage >/dev/null 2>&1; then
@@ -169,11 +181,36 @@ prepare_portage_writable_dir() {
     printf '[portageforge] error: could not chmod 2775 %s\n' "$path" >&2
     exit 1
   fi
+
+  if ! find "$path" -maxdepth 1 \( -name '.__portage_test_write__' -o -name '.__portageforge_write_test__' -o -name '*.__download__' \) -exec rm -f -- {} +; then
+    printf '[portageforge] error: could not remove stale Portage temporary files from %s\n' "$path" >&2
+    exit 1
+  fi
+
+  test_path="$path/.__portageforge_write_test__"
+  if id -u portage >/dev/null 2>&1; then
+    printf -v test_path_q '%q' "$test_path"
+    if ! su -s /bin/sh portage -c ": >$test_path_q && rm -f $test_path_q"; then
+      printf '[portageforge] error: the portage user cannot write to %s\n' "$path" >&2
+      exit 1
+    fi
+  else
+    if ! touch "$test_path" || ! rm -f "$test_path"; then
+      printf '[portageforge] error: cannot write to %s\n' "$path" >&2
+      exit 1
+    fi
+  fi
 }
 
 prepare_target_workdirs() {
+  local target_data_dir
+
   printf '[portageforge] preparing writable Portage work directories\n'
   mkdir -p "$(dirname "$TARGET_SYSROOT_PATH")"
+  prepare_portage_traversable_dir "$DATA_ROOT"
+  prepare_portage_traversable_dir "$TARGET_DATA_ROOT"
+  target_data_dir=$(dirname "$PKGDIR_PATH")
+  prepare_portage_writable_dir "$target_data_dir"
   prepare_portage_writable_dir "$PKGDIR_PATH"
   prepare_portage_writable_dir "$DISTDIR_PATH"
   prepare_portage_writable_dir "$PORTAGE_TMPDIR_PATH"

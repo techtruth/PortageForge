@@ -185,10 +185,13 @@ vm/data/targets/
 ```
 
 The launcher exports `vm/targets/` as read-only and `vm/data/` as writable.
+Cloud-init installs the current `scripts/portageforge-builder` into the VM at
+`/usr/local/sbin/portageforge-builder` and starts it through systemd.
+
 Re-run `make setup` when you need to recreate the VM disks, change bootstrap
-SSH access, or update the in-VM builder script embedded in `images/seed.iso`.
-Replacing target snapshots or package lists does not require rebuilding the
-seed.
+SSH access, update the in-VM builder script, or change the service embedded in
+`images/seed.iso`. Replacing target snapshots, package lists, or runtime config
+does not require rebuilding the seed.
 
 Optional runtime settings can be placed in:
 
@@ -277,7 +280,9 @@ dependencies in the graph.
 
 `PKGDIR`, `DISTDIR`, and `PORTAGE_TMPDIR` are prepared as writable directories
 for the VM's `portage` user before each target build. This matters because
-Portage fetch/build workers do not always run as root.
+Portage fetch/build workers do not always run as root. PortageForge also removes
+stale `.__portage_test_write__` and `*.__download__` files, then verifies the
+`portage` user can create and remove a probe file before `emerge` starts.
 
 ## Target Setup
 
