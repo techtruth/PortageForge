@@ -270,7 +270,7 @@ for each /mnt/portageforge-targets/*.tar:
   create CBUILD and CHOST wrapper toolchains
   run emerge --sync with the target config root
   compile/run builder wrapper probes and compile target wrapper probes
-  install target build dependencies with BROOT=/ and SYSROOT=<target sysroot>
+  emptytree-install target build dependencies with BROOT=/ and SYSROOT=<target sysroot>
   emerge the full target package set with --emptytree --buildpkg
   run emaint binhost --fix for the target PKGDIR
 sleep 24 hours
@@ -286,9 +286,11 @@ root persist; the target sysroot does not.
 
 PortageForge does not treat the builder's `@world` as the target machine and
 does not apply target CPU flags to builder-native packages. Builder-native
-packages are prepared under `/`. Target package outputs are merged under
-`ROOT=<target sysroot>` with `SYSROOT=<target sysroot>` and the target
-snapshot's `/etc/portage` policy. Native `BDEPEND` tools resolve against
+packages are prepared under `/`. Target build dependencies are installed with
+`--emptytree --onlydeps` so stage3's preinstalled package database does not
+decide target-policy USE or Python slot transitions. Target package outputs are
+merged under `ROOT=<target sysroot>` with `SYSROOT=<target sysroot>` and the
+target snapshot's `/etc/portage` policy. Native `BDEPEND` tools resolve against
 `BROOT=/`; target `DEPEND` and `RDEPEND` resolve against the target sysroot.
 
 `PKGDIR`, `DISTDIR`, and `PORTAGE_TMPDIR` are prepared as writable directories

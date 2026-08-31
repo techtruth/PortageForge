@@ -37,12 +37,6 @@ fi
 BUILD_JOBS=${PORTAGEFORGE_BUILD_JOBS:-$DEFAULT_BUILD_JOBS}
 CROSS_RESOLVER_ARGS=(
   --backtrack=100
-  --changed-deps
-  --changed-slot
-  --changed-use
-  --complete-graph=n
-  --complete-graph-if-new-use=n
-  --complete-graph-if-new-ver=n
   --verbose-conflicts
 )
 
@@ -897,13 +891,11 @@ install_target_build_dependencies() {
     --oneshot
     --ignore-world=y
     --onlydeps
+    --emptytree
     --onlydeps-with-rdeps=n
     --onlydeps-with-ideps=n
     --with-bdeps=y
     --buildpkg=n
-    --update
-    --deep
-    --newuse
     --jobs="$BUILD_JOBS"
   )
   local targets=("$@")
