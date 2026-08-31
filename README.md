@@ -77,10 +77,10 @@ installed package code -> CHOST wrappers, target-optimized
 The target `CHOST` stays normal, so target machines do not need a custom
 `ACCEPT_CHOSTS` just to consume the binhost.
 
-On startup, the builder syncs and updates the builder root with the builder's
-own Portage policy and builder-safe flags. It then installs native toolchain
-basics such as `gcc`, `g++`, `make`, and binutils into `/` before any target
-build starts.
+On startup, the builder syncs the builder repository, verifies that the builder
+already has the native commands needed to build packages, then updates the
+builder root from source with the builder's own Portage policy and builder-safe
+flags.
 
 After repository sync, the builder runs wrapper probes before starting package
 builds. Builder-side probes are compiled and executed. Target-side probes are
@@ -252,7 +252,8 @@ On VM startup, PortageForge does this:
 ```text
 mount host vm/targets at /mnt/portageforge-targets
 mount host vm/data at /mnt/portageforge-data
-sync/update builder-native packages with builder policy
+validate builder-native build commands
+source-update builder-native @world with builder policy
 start the HTTP binhost server
 ```
 

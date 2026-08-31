@@ -267,23 +267,11 @@ validate_builder_runtime() {
   done
 }
 
-install_builder_native_toolchain_basics() {
-  printf '[portageforge] installing builder-native toolchain basics\n'
-  builder_emerge \
-    --getbinpkg=y \
-    --usepkg=y \
-    --buildpkg=n \
-    --oneshot \
-    --noreplace \
-    sys-devel/gcc \
-    sys-devel/binutils \
-    sys-devel/make \
-    virtual/pkgconfig
-}
-
 update_builder_native_system() {
   printf '[portageforge] updating builder-native packages with builder policy\n'
   builder_emerge \
+    --getbinpkg=n \
+    --usepkg=n \
     --buildpkg=n \
     --update \
     --deep \
@@ -295,7 +283,7 @@ update_builder_native_system() {
 prepare_builder_native_system() {
   printf '[portageforge] syncing builder repository with builder policy\n'
   run_with_sync_retries "builder repository sync" builder_emerge --sync
-  install_builder_native_toolchain_basics
+  validate_builder_runtime
   update_builder_native_system
   validate_builder_runtime
 
