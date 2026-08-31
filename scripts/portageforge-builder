@@ -36,7 +36,6 @@ else
 fi
 BUILD_JOBS=${PORTAGEFORGE_BUILD_JOBS:-$DEFAULT_BUILD_JOBS}
 CROSS_RESOLVER_ARGS=(
-  --autounmask-backtrack=y
   --backtrack=100
   --changed-deps
   --changed-slot
@@ -55,10 +54,6 @@ cleanup() {
 
 is_positive_integer() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
-}
-
-is_nonnegative_integer() {
-  [[ "$1" =~ ^[0-9]+$ ]]
 }
 
 is_tcp_port() {
@@ -119,7 +114,7 @@ validate_builder_config() {
     printf '[portageforge] error: PORTAGEFORGE_SYNC_ATTEMPTS must be a positive integer: %s\n' "$SYNC_ATTEMPTS" >&2
     exit 1
   fi
-  if ! is_nonnegative_integer "$SYNC_RETRY_SECONDS"; then
+  if ! [[ "$SYNC_RETRY_SECONDS" =~ ^[0-9]+$ ]]; then
     printf '[portageforge] error: PORTAGEFORGE_SYNC_RETRY_SECONDS must be a non-negative integer: %s\n' "$SYNC_RETRY_SECONDS" >&2
     exit 1
   fi
@@ -230,11 +225,33 @@ prepare_target_workdirs() {
   prepare_portage_writable_dir "$target_data_dir"
   prepare_portage_writable_dir "$PKGDIR_PATH"
   prepare_portage_writable_dir "$DISTDIR_PATH"
+  rm -rf "$PORTAGE_TMPDIR_PATH"
   prepare_portage_writable_dir "$PORTAGE_TMPDIR_PATH"
 }
 
-ensure_builder_runtime() {
-  local missing=0
+builder_run() {
+  local command_name=$1
+  shift
+
+  env \
+    ROOT=/ \
+    SYSROOT=/ \
+    BROOT=/ \
+    PORTAGE_CONFIGROOT=/ \
+    COMMON_FLAGS="$BUILDER_COMMON_FLAGS" \
+    CFLAGS="$BUILDER_COMMON_FLAGS" \
+    CXXFLAGS="$BUILDER_COMMON_FLAGS" \
+    FCFLAGS="$BUILDER_COMMON_FLAGS" \
+    FFLAGS="$BUILDER_COMMON_FLAGS" \
+    MAKEOPTS="-j$BUILD_JOBS" \
+    "$command_name" "$@"
+}
+
+builder_emerge() {
+  builder_run emerge "$@"
+}
+
+validate_builder_runtime() {
   local required_command
 
   if ! command -v emerge >/dev/null 2>&1; then
@@ -244,33 +261,45 @@ ensure_builder_runtime() {
 
   for required_command in gcc g++ make ar as ld pkg-config portageq sha256sum; do
     if ! command -v "$required_command" >/dev/null 2>&1; then
-      missing=1
-    fi
-  done
-
-  if [[ "$missing" -ne 0 ]]; then
-    printf '[portageforge] installing builder-native toolchain basics\n'
-    if [[ ! -d /var/db/repos/gentoo ]]; then
-      printf '[portageforge] syncing builder repository before toolchain bootstrap\n'
-      run_with_sync_retries "builder repository sync" emerge --sync
-    fi
-    emerge \
-      --getbinpkg=y \
-      --usepkg=y \
-      --oneshot \
-      --noreplace \
-      sys-devel/gcc \
-      sys-devel/binutils \
-      sys-devel/make \
-      virtual/pkgconfig
-  fi
-
-  for required_command in gcc g++ make ar as ld pkg-config portageq sha256sum; do
-    if ! command -v "$required_command" >/dev/null 2>&1; then
-      printf '[portageforge] error: builder command still missing after bootstrap: %s\n' "$required_command" >&2
+      printf '[portageforge] error: builder command is missing: %s\n' "$required_command" >&2
       exit 1
     fi
   done
+}
+
+install_builder_native_toolchain_basics() {
+  printf '[portageforge] installing builder-native toolchain basics\n'
+  builder_emerge \
+    --getbinpkg=y \
+    --usepkg=y \
+    --buildpkg=n \
+    --oneshot \
+    --noreplace \
+    sys-devel/gcc \
+    sys-devel/binutils \
+    sys-devel/make \
+    virtual/pkgconfig
+}
+
+update_builder_native_system() {
+  printf '[portageforge] updating builder-native packages with builder policy\n'
+  builder_emerge \
+    --buildpkg=n \
+    --update \
+    --deep \
+    --newuse \
+    --jobs="$BUILD_JOBS" \
+    @world
+}
+
+prepare_builder_native_system() {
+  printf '[portageforge] syncing builder repository with builder policy\n'
+  run_with_sync_retries "builder repository sync" builder_emerge --sync
+  install_builder_native_toolchain_basics
+  update_builder_native_system
+  validate_builder_runtime
+
+  printf '[portageforge] builder-native package preparation complete\n'
 }
 
 sanitize_target_name() {
@@ -280,20 +309,6 @@ sanitize_target_name() {
   name=${name##-}
   name=${name%%-}
   printf '%s' "${name:-target}"
-}
-
-package_name_from_pf() {
-  local pf=$1
-  local without_build_id
-
-  if [[ "$pf" =~ -[0-9]+$ ]]; then
-    without_build_id=${pf%-[0-9]*}
-    if [[ "$without_build_id" =~ -[0-9] ]]; then
-      pf=$without_build_id
-    fi
-  fi
-
-  printf '%s\n' "${pf%-[0-9]*}"
 }
 
 fetch_url() {
@@ -410,25 +425,17 @@ download_stage3() {
   printf '%s\n' "$archive_path"
 }
 
-ensure_target_sysroot() {
+prepare_target_sysroot() {
   local archive_path
-  local current_variant=
   local profile=$1
   local stage3_download_dir
   local variant
   local variant_file="$TARGET_SYSROOT_PATH/.portageforge-stage3-variant"
 
   variant=$(stage3_variant_for_profile "$profile")
-  if [[ -s "$variant_file" ]]; then
-    current_variant=$(<"$variant_file")
-  fi
-  if [[ -d "$TARGET_SYSROOT_PATH/var/db/pkg" && "$current_variant" == "$variant" ]]; then
-    return
-  fi
-
   archive_path=$(download_stage3 "$variant")
   stage3_download_dir=$(dirname "$archive_path")
-  printf '[portageforge] creating %s target sysroot for %s\n' "$variant" "$TARGET_NAME"
+  printf '[portageforge] recreating fresh %s target sysroot for %s\n' "$variant" "$TARGET_NAME"
   rm -rf "$TARGET_SYSROOT_PATH"
   mkdir -p "$TARGET_SYSROOT_PATH"
   if ! tar -xpf "$archive_path" -C "$TARGET_SYSROOT_PATH" --xattrs --numeric-owner; then
@@ -709,6 +716,7 @@ create_builder_wrappers() {
   local spec
   local tool
 
+  rm -rf "$BUILD_WRAPPERS_DIR"
   mkdir -p "$BUILD_WRAPPERS_DIR"
   for spec in \
     gcc:gcc g++:g++ cc:gcc c++:g++ cpp:cpp \
@@ -893,85 +901,7 @@ cross_emaint() {
   cross_run emaint "$@"
 }
 
-target_package_names() {
-  sed 's/::[A-Za-z0-9._-]\+$//' "$TARGET_SYSROOT_PATH$TARGET_PACKAGE_SET" | sort -u
-}
-
-write_private_sysroot_package_names() {
-  local output_file=$1
-  local target_package_names_file="$PORTAGE_TMPDIR_PATH/target-package-names"
-  local installed_package_names_file="$PORTAGE_TMPDIR_PATH/installed-package-names"
-
-  target_package_names >"$target_package_names_file"
-  installed_sysroot_package_names >"$installed_package_names_file"
-  comm -23 "$installed_package_names_file" "$target_package_names_file" >"$output_file"
-}
-
-write_target_sysroot_package_names() {
-  local output_file=$1
-  local target_package_names_file="$PORTAGE_TMPDIR_PATH/target-package-names"
-  local installed_package_names_file="$PORTAGE_TMPDIR_PATH/installed-package-names"
-
-  target_package_names >"$target_package_names_file"
-  installed_sysroot_package_names >"$installed_package_names_file"
-  comm -12 "$installed_package_names_file" "$target_package_names_file" >"$output_file"
-}
-
-installed_sysroot_package_names() {
-  local category
-  local pkgdir
-  local pn
-  local pnvr
-
-  for pkgdir in "$TARGET_SYSROOT_PATH/var/db/pkg"/*/*; do
-    [[ -d "$pkgdir" ]] || continue
-    category=${pkgdir%/*}
-    category=${category##*/}
-    pnvr=${pkgdir##*/}
-    pn=$(package_name_from_pf "$pnvr")
-    printf '%s/%s\n' "$category" "$pn"
-  done | sort -u
-}
-
-update_existing_sysroot_packages() {
-  local buildpkg_exclude
-  local installed_packages="$PORTAGE_TMPDIR_PATH/installed-packages"
-  local private_installed_packages="$PORTAGE_TMPDIR_PATH/private-installed-packages-for-align"
-  local emerge_args=(
-    "${CROSS_RESOLVER_ARGS[@]}"
-    --usepkg=n
-    --getbinpkg=n
-    --oneshot
-    --ignore-world=y
-    --with-bdeps=y
-    --buildpkg
-    --update
-    --deep
-    --newuse
-    --jobs="$BUILD_JOBS"
-  )
-  local sysroot_targets=()
-
-  mkdir -p "$PORTAGE_TMPDIR_PATH"
-  installed_sysroot_package_names >"$installed_packages"
-  if [[ ! -s "$installed_packages" ]]; then
-    printf '[portageforge] no existing sysroot packages need alignment\n'
-    return 0
-  fi
-
-  write_private_sysroot_package_names "$private_installed_packages"
-  if [[ -s "$private_installed_packages" ]]; then
-    buildpkg_exclude=$(paste -sd ' ' "$private_installed_packages")
-    emerge_args+=("--buildpkg-exclude=$buildpkg_exclude")
-    printf '[portageforge] excluding %s private sysroot package(s) from alignment binpkg output\n' "$(wc -l <"$private_installed_packages")"
-  fi
-
-  mapfile -t sysroot_targets <"$installed_packages"
-  printf '[portageforge] updating %s existing sysroot package(s) together for current target policy\n' "${#sysroot_targets[@]}"
-  cross_emerge "${emerge_args[@]}" "${sysroot_targets[@]}"
-}
-
-emerge_private_build_dependencies() {
+install_target_build_dependencies() {
   local emerge_args=(
     "${CROSS_RESOLVER_ARGS[@]}"
     --usepkg=n
@@ -980,6 +910,7 @@ emerge_private_build_dependencies() {
     --ignore-world=y
     --onlydeps
     --onlydeps-with-rdeps=n
+    --onlydeps-with-ideps=n
     --with-bdeps=y
     --buildpkg=n
     --update
@@ -989,83 +920,29 @@ emerge_private_build_dependencies() {
   )
   local targets=("$@")
 
+  printf '[portageforge] installing target build dependencies with split BROOT/SYSROOT policy\n'
   cross_emerge "${emerge_args[@]}" "${targets[@]}"
 }
 
-resolve_private_build_dependencies() {
-  local output_file
-  local phase=$1
-  local phase_slug
-  shift
-  local targets=("$@")
-  phase_slug=$(printf '%s' "$phase" | tr -c 'A-Za-z0-9._-' '-')
-  output_file="$PORTAGE_TMPDIR_PATH/private-build-dependencies-$phase_slug.log"
-
-  printf '[portageforge] resolving private cross-build dependencies (%s)\n' "$phase"
-  if emerge_private_build_dependencies "${targets[@]}" 2>&1 | tee "$output_file"; then
-    return 0
-  fi
-
-  printf '[portageforge] error: private cross-build dependency resolution failed during %s\n' "$phase" >&2
-  return 1
-}
-
-install_private_build_dependencies() {
-  local private_installed_packages=$1
-  shift
-  local targets=("$@")
-
-  mkdir -p "$PORTAGE_TMPDIR_PATH"
-
-  apply_target_portage_config
-  if ! update_existing_sysroot_packages; then
-    return 1
-  fi
-
-  apply_target_portage_config
-  if ! resolve_private_build_dependencies target-private-dependencies "${targets[@]}"; then
-    return 1
-  fi
-
-  apply_target_portage_config
-  create_target_wrappers
-  write_private_sysroot_package_names "$private_installed_packages"
-  if [[ -s "$private_installed_packages" ]]; then
-    printf '[portageforge] excluding %s private sysroot package(s) from binpkg output\n' "$(wc -l <"$private_installed_packages")"
-  fi
-}
-
 emerge_target_packages() {
-  local buildpkg_exclude
   local emerge_args=(
     "${CROSS_RESOLVER_ARGS[@]}"
     --usepkg=n
     --getbinpkg=n
     --oneshot
     --ignore-world=y
-    --with-bdeps=y
+    --with-bdeps=n
     --buildpkg
+    --emptytree
     --jobs="$BUILD_JOBS"
   )
-  local private_buildpkg_excludes_file="$PORTAGE_TMPDIR_PATH/private-buildpkg-excludes"
   local targets=(@portageforge-binhost-packages)
 
-  if ! install_private_build_dependencies "$private_buildpkg_excludes_file" "${targets[@]}"; then
+  if ! install_target_build_dependencies "${targets[@]}"; then
     return 1
   fi
-  if [[ -s "$private_buildpkg_excludes_file" ]]; then
-    buildpkg_exclude=$(paste -sd ' ' "$private_buildpkg_excludes_file")
-    emerge_args+=("--buildpkg-exclude=$buildpkg_exclude")
-  fi
 
-  if [[ -n "$(find "$PKGDIR_PATH" -type f ! -name Packages -print -quit 2>/dev/null)" ]]; then
-    printf '[portageforge] cross-building current binhost package updates\n'
-    emerge_args+=(--update --deep --newuse)
-  else
-    printf '[portageforge] binpkg cache is empty; cross-building full binhost package set\n'
-    emerge_args+=(--emptytree)
-  fi
-
+  printf '[portageforge] cross-building full target binhost package set\n'
   cross_emerge "${emerge_args[@]}" "${targets[@]}"
 }
 
@@ -1139,7 +1016,7 @@ prepare_builder_from_snapshot() {
     exit 1
   fi
 
-  ensure_target_sysroot "$profile"
+  prepare_target_sysroot "$profile"
   apply_target_portage_config
   create_builder_wrappers
   create_target_wrappers
@@ -1190,7 +1067,6 @@ build_target() {
 
   if [[ "$result" -eq 0 ]]; then
     apply_target_portage_config
-    create_target_wrappers
     if ! validate_tool_wrappers; then
       printf '[portageforge] error: wrapper validation failed for %s\n' "$TARGET_NAME" >&2
       result=1
@@ -1240,7 +1116,7 @@ prepare_data_share
 load_builder_config
 validate_builder_config
 printf '[portageforge] starting true-cross microarchitecture-only builder\n'
-ensure_builder_runtime
+prepare_builder_native_system
 start_binhost_server
 while true; do
   if build_cycle; then

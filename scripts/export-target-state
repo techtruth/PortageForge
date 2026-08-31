@@ -178,66 +178,11 @@ load_package_entries() {
       seen_repositories[$repository]=1
     fi
     if [[ "$repository" == gentoo ]]; then
-      ACTIVE_PACKAGES+=("$entry")
+      active_entries=$((active_entries + 1))
     fi
   done
 
   mapfile -t REPOSITORIES < <(printf '%s\n' "${REPOSITORIES[@]}" | sort -u)
-}
-
-run_resolver_check() {
-  local label=$1
-  local output_file="$tmpdir/resolver-$label.log"
-  shift
-
-  printf '[export-target] validating resolver graph: %s\n' "$label" >&2
-  if "$@" >"$output_file" 2>&1; then
-    printf '[export-target] validation passed: %s\n' "$label" >&2
-    return 0
-  fi
-
-  cat "$output_file" >&2
-  printf '[export-target] error: resolver validation failed: %s\n' "$label" >&2
-  printf '[export-target] error: no target snapshot or package list was exported\n' >&2
-  return 1
-}
-
-validate_package_graph() {
-  if ! command -v emerge >/dev/null 2>&1; then
-    printf '[export-target] error: emerge not found\n' >&2
-    exit 1
-  fi
-
-  if [[ "${#ACTIVE_PACKAGES[@]}" -eq 0 ]]; then
-    printf '[export-target] error: no active ::gentoo package entries to validate\n' >&2
-    exit 1
-  fi
-
-  run_resolver_check \
-    target-private-dependencies \
-    emerge \
-      --pretend \
-      --usepkg=n \
-      --getbinpkg=n \
-      --oneshot \
-      --ignore-world=y \
-      --with-bdeps=y \
-      --onlydeps \
-      --onlydeps-with-rdeps=n \
-      --emptytree \
-      "${ACTIVE_PACKAGES[@]}"
-
-  run_resolver_check \
-    target-final \
-    emerge \
-      --pretend \
-      --usepkg=n \
-      --getbinpkg=n \
-      --oneshot \
-      --ignore-world=y \
-      --with-bdeps=y \
-      --emptytree \
-      "${ACTIVE_PACKAGES[@]}"
 }
 
 if [[ ! -f "$PORTAGE_DIR/make.conf" ]]; then
@@ -278,7 +223,6 @@ active_entries=0
 commented_entries=0
 snapshot_dir="$tmpdir/snapshot"
 PACKAGE_ENTRIES=()
-ACTIVE_PACKAGES=()
 REPOSITORIES=()
 
 mkdir -p "$snapshot_dir/etc" "$snapshot_dir/metadata"
@@ -292,13 +236,11 @@ copy_if_present /etc/locale.gen "$snapshot_dir/etc/locale.gen"
 copy_if_present /etc/locale.conf "$snapshot_dir/etc/locale.conf"
 copy_if_present /usr/src/linux "$snapshot_dir/usr/src/linux"
 load_package_entries
-active_entries=${#ACTIVE_PACKAGES[@]}
 commented_entries=$((${#PACKAGE_ENTRIES[@]} - active_entries))
 if [[ "$active_entries" -eq 0 ]]; then
   printf '[export-target] error: no active ::gentoo package entries found in %s\n' "$PACKAGE_DB" >&2
   exit 1
 fi
-validate_package_graph
 
 printf '%s\n' "$target_hostname" >"$snapshot_dir/metadata/hostname"
 printf '%s\n' "$profile" >"$snapshot_dir/metadata/profile"

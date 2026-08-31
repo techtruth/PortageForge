@@ -77,10 +77,10 @@ installed package code -> CHOST wrappers, target-optimized
 The target `CHOST` stays normal, so target machines do not need a custom
 `ACCEPT_CHOSTS` just to consume the binhost.
 
-On startup, the builder verifies that the builder root has native toolchain
-basics such as `gcc`, `g++`, `make`, and binutils. If they are missing, it asks
-Portage to install them as builder-native packages before any target build
-starts.
+On startup, the builder syncs and updates the builder root with the builder's
+own Portage policy and builder-safe flags. It then installs native toolchain
+basics such as `gcc`, `g++`, `make`, and binutils into `/` before any target
+build starts.
 
 After repository sync, the builder runs wrapper probes before starting package
 builds. Builder-side probes are compiled and executed. Target-side probes are
@@ -247,40 +247,48 @@ http://<qemu-host>:8080/targets/<target-hostname>/binpkgs/
 
 ## Builder Behavior
 
-Each cycle does this:
+On VM startup, PortageForge does this:
 
 ```text
 mount host vm/targets at /mnt/portageforge-targets
 mount host vm/data at /mnt/portageforge-data
+sync/update builder-native packages with builder policy
+start the HTTP binhost server
+```
+
+Each build cycle then does this:
+
+```text
 for each /mnt/portageforge-targets/*.tar:
   validate and load the target snapshot and package list
   confirm the target CHOST matches the builder GCC target
-  create or reuse /var/lib/portageforge/targets/<target>/sysroot from stage3
+  recreate /var/lib/portageforge/targets/<target>/sysroot from stage3
   prepare binpkg, distfiles, and Portage temp directories for the portage user
   restore the target /etc/portage policy into that sysroot
   append PortageForge cross-build settings
   create CBUILD and CHOST wrapper toolchains
   run emerge --sync with the target config root
   compile/run builder wrapper probes and compile target wrapper probes
-  update all already-installed sysroot packages together for current target policy
-  install/update private cross-build dependencies
-  emerge target packages with --buildpkg into the target sysroot
+  install target build dependencies with BROOT=/ and SYSROOT=<target sysroot>
+  emerge the full target package set with --emptytree --buildpkg
   run emaint binhost --fix for the target PKGDIR
-serve /mnt/portageforge-data over HTTP
 sleep 24 hours
 ```
 
 PortageForge emits modern `.gpkg.tar` binary packages. The legacy `xpak` format
 is not supported.
 
-The target sysroot is long-lived builder state. PortageForge keeps it aligned
-with the current target policy before resolving new private dependencies. It
-updates already-installed target and private sysroot packages in one resolver
-graph so interpreter, slot, and subslot transitions move together. Private-only
-sysroot packages are excluded from binpkg output during that alignment pass.
-Cross-build resolver calls request changed-use, changed-deps, changed-slot, and
-autounmask backtracking while disabling complete-graph preservation that would
-otherwise keep stale installed packages in the graph.
+The target sysroot is disposable builder state. It is recreated from stage3 for
+each target build so stale packages from earlier resolver attempts cannot stay
+installed and poison slot transitions. The binpkg cache, distfiles, and builder
+root persist; the target sysroot does not.
+
+PortageForge does not treat the builder's `@world` as the target machine and
+does not apply target CPU flags to builder-native packages. Builder-native
+packages are prepared under `/`. Target package outputs are merged under
+`ROOT=<target sysroot>` with `SYSROOT=<target sysroot>` and the target
+snapshot's `/etc/portage` policy. Native `BDEPEND` tools resolve against
+`BROOT=/`; target `DEPEND` and `RDEPEND` resolve against the target sysroot.
 
 `PKGDIR`, `DISTDIR`, and `PORTAGE_TMPDIR` are prepared as writable directories
 for the VM's `portage` user before each target build. This matters because
@@ -357,9 +365,9 @@ sure the generated `portageforge-builder.service` does not include
 `After=cloud-final.service`, then rerun `make setup` so `images/seed.iso`
 contains the fixed unit.
 
-If dependency resolution reports multiple package instances in one slot after
-the sysroot alignment phase, the next place to look is the package-specific USE
-or `PYTHON_TARGETS` constraint shown by Portage's verbose conflict output.
+If dependency resolution reports package-specific USE or `PYTHON_TARGETS`
+constraints, update the target's `/etc/portage` policy and export a fresh
+target snapshot.
 
 Expect the first rough edges around:
 
