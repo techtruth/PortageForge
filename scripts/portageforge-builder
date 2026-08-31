@@ -19,6 +19,7 @@ BINHOST_PORT=${PORTAGEFORGE_BINHOST_PORT:-8080}
 BUILDER_CHOST=${PORTAGEFORGE_BUILDER_CHOST:-x86_64-portageforge-linux-gnu}
 BUILDER_COMMON_FLAGS=${PORTAGEFORGE_BUILDER_COMMON_FLAGS:-"-O2 -pipe -march=x86-64"}
 BUILD_WRAPPERS_DIR=/var/lib/portageforge/build-wrappers
+BUILDER_POLICY_OVERLAY_PREFIX=zz-portageforge-target-policy
 CPU_COUNT=$(nproc 2>/dev/null || printf '1')
 HTTP_PID=
 TARGET_NAME=
@@ -29,15 +30,11 @@ TARGET_WRAPPERS_DIR=
 PKGDIR_PATH=
 DISTDIR_PATH=
 PORTAGE_TMPDIR_PATH=
-TARGET_POLICY_ENV=()
+TARGET_POLICY_VALUES=()
 TARGET_POLICY_VARIABLES=(
   ACCEPT_KEYWORDS
-  ACCEPT_LICENSE
-  ACCEPT_PROPERTIES
-  ACCEPT_RESTRICT
   PYTHON_TARGETS
   PYTHON_SINGLE_TARGET
-  PERL_FEATURES
   RUBY_TARGETS
   LUA_TARGETS
   LUA_SINGLE_TARGET
@@ -54,6 +51,7 @@ CROSS_RESOLVER_ARGS=(
 )
 
 cleanup() {
+  clear_builder_target_policy_overlays || true
   if [[ -n "$HTTP_PID" ]]; then
     kill "$HTTP_PID" 2>/dev/null || true
   fi
@@ -288,6 +286,7 @@ update_builder_native_system() {
 }
 
 prepare_builder_native_system() {
+  clear_builder_target_policy_overlays
   printf '[portageforge] syncing builder repository with builder policy\n'
   run_with_sync_retries "builder repository sync" builder_emerge --sync
   validate_builder_runtime
@@ -774,13 +773,25 @@ target_portage_envvar() {
   fi
 }
 
-load_target_policy_env() {
+target_policy_value() {
+  local entry
+  local variable_name=$1
+
+  for entry in "${TARGET_POLICY_VALUES[@]}"; do
+    if [[ "$entry" == "$variable_name="* ]]; then
+      printf '%s\n' "${entry#*=}"
+      return
+    fi
+  done
+}
+
+load_target_policy_values() {
   local loaded=()
-  local policy_env=()
+  local policy_values=()
   local value
   local variable_name
 
-  TARGET_POLICY_ENV=()
+  TARGET_POLICY_VALUES=()
   for variable_name in "${TARGET_POLICY_VARIABLES[@]}"; do
     if ! value=$(target_portage_envvar "$variable_name"); then
       return 1
@@ -792,14 +803,112 @@ load_target_policy_env() {
       printf '[portageforge] error: target Portage variable contains a newline and cannot be projected safely: %s\n' "$variable_name" >&2
       return 1
     fi
-    policy_env+=("$variable_name=$value")
+    policy_values+=("$variable_name=$value")
     loaded+=("$variable_name")
   done
 
-  TARGET_POLICY_ENV=("${policy_env[@]}")
+  TARGET_POLICY_VALUES=("${policy_values[@]}")
   if [[ "${#loaded[@]}" -gt 0 ]]; then
-    printf '[portageforge] projecting selected target policy to native build dependencies: %s\n' "${loaded[*]}"
+    printf '[portageforge] loaded target policy bridge values for native build dependencies: %s\n' "${loaded[*]}"
   fi
+}
+
+clear_builder_target_policy_overlays() {
+  local config_name
+  local path
+
+  for config_name in package.accept_keywords package.use; do
+    path="/etc/portage/$config_name"
+    if [[ -d "$path" ]]; then
+      rm -f "$path/$BUILDER_POLICY_OVERLAY_PREFIX"-*
+    fi
+  done
+}
+
+builder_overlay_file() {
+  local config_name=$1
+  local path="/etc/portage/$config_name"
+
+  if [[ -e "$path" && ! -d "$path" ]]; then
+    printf '[portageforge] error: builder %s must be a directory for PortageForge target policy overlays\n' "$path" >&2
+    return 1
+  fi
+  mkdir -p "$path"
+  printf '%s/%s-%s\n' "$path" "$BUILDER_POLICY_OVERLAY_PREFIX" "$TARGET_NAME"
+}
+
+append_target_portage_config_path() {
+  local destination=$1
+  local relative_path=$2
+  local source="$TARGET_SYSROOT_PATH/etc/portage/$relative_path"
+  local source_file
+
+  if [[ -f "$source" ]]; then
+    printf '\n# from target %s\n' "etc/portage/$relative_path" >>"$destination"
+    cat "$source" >>"$destination"
+    return
+  fi
+  if [[ ! -d "$source" ]]; then
+    return
+  fi
+
+  while IFS= read -r source_file; do
+    printf '\n# from target %s\n' "${source_file#"$TARGET_SYSROOT_PATH/"}" >>"$destination"
+    cat "$source_file" >>"$destination"
+  done < <(find "$source" -type f | sort)
+}
+
+append_target_use_expand_policy() {
+  local destination=$1
+  local value
+  local variable_name
+
+  for variable_name in PYTHON_TARGETS PYTHON_SINGLE_TARGET RUBY_TARGETS LUA_TARGETS LUA_SINGLE_TARGET; do
+    value=$(target_policy_value "$variable_name")
+    if [[ -n "$value" ]]; then
+      printf '*/* %s: %s\n' "$variable_name" "$value" >>"$destination"
+    fi
+  done
+}
+
+write_builder_accept_keywords_overlay() {
+  local accept_keywords
+  local destination
+
+  destination=$(builder_overlay_file package.accept_keywords)
+  : >"$destination"
+
+  accept_keywords=$(target_policy_value ACCEPT_KEYWORDS)
+  if [[ -n "$accept_keywords" ]]; then
+    printf '# global target ACCEPT_KEYWORDS projected for BROOT dependencies\n' >>"$destination"
+    printf '*/* %s\n' "$accept_keywords" >>"$destination"
+  fi
+  append_target_portage_config_path "$destination" package.accept_keywords
+  append_target_portage_config_path "$destination" package.keywords
+
+  if [[ ! -s "$destination" ]]; then
+    rm -f "$destination"
+  fi
+}
+
+write_builder_package_use_overlay() {
+  local destination
+
+  destination=$(builder_overlay_file package.use)
+  : >"$destination"
+
+  append_target_use_expand_policy "$destination"
+
+  if [[ ! -s "$destination" ]]; then
+    rm -f "$destination"
+  fi
+}
+
+apply_builder_target_policy_overlay() {
+  clear_builder_target_policy_overlays
+  write_builder_accept_keywords_overlay
+  write_builder_package_use_overlay
+  printf '[portageforge] applied target keyword and language overlays for native BROOT dependencies\n'
 }
 
 validate_tool_wrappers() {
@@ -910,7 +1019,6 @@ cross_run() {
   )
   shift
 
-  env_args+=("${TARGET_POLICY_ENV[@]}")
   env "${env_args[@]}" "$command_name" "$@"
 }
 
@@ -1043,7 +1151,8 @@ prepare_builder_from_snapshot() {
   apply_target_portage_config
   create_builder_wrappers
   create_target_wrappers
-  load_target_policy_env
+  load_target_policy_values
+  apply_builder_target_policy_overlay
 
   printf '[portageforge] builder CBUILD: %s\n' "$BUILDER_CHOST"
   printf '[portageforge] target CHOST: %s\n' "$TARGET_CHOST"
