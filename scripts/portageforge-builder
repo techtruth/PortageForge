@@ -29,6 +29,19 @@ TARGET_WRAPPERS_DIR=
 PKGDIR_PATH=
 DISTDIR_PATH=
 PORTAGE_TMPDIR_PATH=
+TARGET_POLICY_ENV=()
+TARGET_POLICY_VARIABLES=(
+  ACCEPT_KEYWORDS
+  ACCEPT_LICENSE
+  ACCEPT_PROPERTIES
+  ACCEPT_RESTRICT
+  PYTHON_TARGETS
+  PYTHON_SINGLE_TARGET
+  PERL_FEATURES
+  RUBY_TARGETS
+  LUA_TARGETS
+  LUA_SINGLE_TARGET
+)
 if [[ "$CPU_COUNT" -gt 1 ]]; then
   DEFAULT_BUILD_JOBS=$((CPU_COUNT - 1))
 else
@@ -761,6 +774,34 @@ target_portage_envvar() {
   fi
 }
 
+load_target_policy_env() {
+  local loaded=()
+  local policy_env=()
+  local value
+  local variable_name
+
+  TARGET_POLICY_ENV=()
+  for variable_name in "${TARGET_POLICY_VARIABLES[@]}"; do
+    if ! value=$(target_portage_envvar "$variable_name"); then
+      return 1
+    fi
+    if [[ -z "$value" ]]; then
+      continue
+    fi
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+      printf '[portageforge] error: target Portage variable contains a newline and cannot be projected safely: %s\n' "$variable_name" >&2
+      return 1
+    fi
+    policy_env+=("$variable_name=$value")
+    loaded+=("$variable_name")
+  done
+
+  TARGET_POLICY_ENV=("${policy_env[@]}")
+  if [[ "${#loaded[@]}" -gt 0 ]]; then
+    printf '[portageforge] projecting selected target policy to native build dependencies: %s\n' "${loaded[*]}"
+  fi
+}
+
 validate_tool_wrappers() {
   local probe_dir="$PORTAGE_TMPDIR_PATH/wrapper-probe"
   local target_cflags
@@ -826,49 +867,51 @@ validate_tool_wrappers() {
 
 cross_run() {
   local command_name=$1
+  local env_args=(
+    PATH="$TARGET_WRAPPERS_DIR:$BUILD_WRAPPERS_DIR:$PATH"
+    PORTAGE_CONFIGROOT="$TARGET_SYSROOT_PATH"
+    ROOT="$TARGET_SYSROOT_PATH"
+    SYSROOT="$TARGET_SYSROOT_PATH"
+    BROOT=/
+    CBUILD="$BUILDER_CHOST"
+    CHOST="$TARGET_CHOST"
+    BUILD_CC="$BUILDER_CHOST-gcc"
+    BUILD_CXX="$BUILDER_CHOST-g++"
+    BUILD_CPP="$BUILDER_CHOST-cpp"
+    BUILD_AR="$BUILDER_CHOST-ar"
+    BUILD_AS="$BUILDER_CHOST-as"
+    BUILD_LD="$BUILDER_CHOST-ld"
+    BUILD_NM="$BUILDER_CHOST-nm"
+    BUILD_RANLIB="$BUILDER_CHOST-ranlib"
+    BUILD_PKG_CONFIG="$BUILDER_CHOST-pkg-config"
+    CC_FOR_BUILD="$BUILDER_CHOST-gcc"
+    CXX_FOR_BUILD="$BUILDER_CHOST-g++"
+    CPP_FOR_BUILD="$BUILDER_CHOST-cpp"
+    AR_FOR_BUILD="$BUILDER_CHOST-ar"
+    AS_FOR_BUILD="$BUILDER_CHOST-as"
+    LD_FOR_BUILD="$BUILDER_CHOST-ld"
+    NM_FOR_BUILD="$BUILDER_CHOST-nm"
+    RANLIB_FOR_BUILD="$BUILDER_CHOST-ranlib"
+    PKG_CONFIG_FOR_BUILD="$BUILDER_CHOST-pkg-config"
+    HOSTCC="$BUILDER_CHOST-gcc"
+    HOSTCXX="$BUILDER_CHOST-g++"
+    CC="$TARGET_CHOST-gcc"
+    CXX="$TARGET_CHOST-g++"
+    CPP="$TARGET_CHOST-cpp"
+    AR="$TARGET_CHOST-ar"
+    AS="$TARGET_CHOST-as"
+    LD="$TARGET_CHOST-ld"
+    NM="$TARGET_CHOST-nm"
+    RANLIB="$TARGET_CHOST-ranlib"
+    STRIP="$TARGET_CHOST-strip"
+    PKG_CONFIG="$TARGET_CHOST-pkg-config"
+    CFLAGS_FOR_BUILD="$BUILDER_COMMON_FLAGS"
+    CXXFLAGS_FOR_BUILD="$BUILDER_COMMON_FLAGS"
+  )
   shift
 
-  env \
-    PATH="$TARGET_WRAPPERS_DIR:$BUILD_WRAPPERS_DIR:$PATH" \
-    PORTAGE_CONFIGROOT="$TARGET_SYSROOT_PATH" \
-    ROOT="$TARGET_SYSROOT_PATH" \
-    SYSROOT="$TARGET_SYSROOT_PATH" \
-    BROOT=/ \
-    CBUILD="$BUILDER_CHOST" \
-    CHOST="$TARGET_CHOST" \
-    BUILD_CC="$BUILDER_CHOST-gcc" \
-    BUILD_CXX="$BUILDER_CHOST-g++" \
-    BUILD_CPP="$BUILDER_CHOST-cpp" \
-    BUILD_AR="$BUILDER_CHOST-ar" \
-    BUILD_AS="$BUILDER_CHOST-as" \
-    BUILD_LD="$BUILDER_CHOST-ld" \
-    BUILD_NM="$BUILDER_CHOST-nm" \
-    BUILD_RANLIB="$BUILDER_CHOST-ranlib" \
-    BUILD_PKG_CONFIG="$BUILDER_CHOST-pkg-config" \
-    CC_FOR_BUILD="$BUILDER_CHOST-gcc" \
-    CXX_FOR_BUILD="$BUILDER_CHOST-g++" \
-    CPP_FOR_BUILD="$BUILDER_CHOST-cpp" \
-    AR_FOR_BUILD="$BUILDER_CHOST-ar" \
-    AS_FOR_BUILD="$BUILDER_CHOST-as" \
-    LD_FOR_BUILD="$BUILDER_CHOST-ld" \
-    NM_FOR_BUILD="$BUILDER_CHOST-nm" \
-    RANLIB_FOR_BUILD="$BUILDER_CHOST-ranlib" \
-    PKG_CONFIG_FOR_BUILD="$BUILDER_CHOST-pkg-config" \
-    HOSTCC="$BUILDER_CHOST-gcc" \
-    HOSTCXX="$BUILDER_CHOST-g++" \
-    CC="$TARGET_CHOST-gcc" \
-    CXX="$TARGET_CHOST-g++" \
-    CPP="$TARGET_CHOST-cpp" \
-    AR="$TARGET_CHOST-ar" \
-    AS="$TARGET_CHOST-as" \
-    LD="$TARGET_CHOST-ld" \
-    NM="$TARGET_CHOST-nm" \
-    RANLIB="$TARGET_CHOST-ranlib" \
-    STRIP="$TARGET_CHOST-strip" \
-    PKG_CONFIG="$TARGET_CHOST-pkg-config" \
-    CFLAGS_FOR_BUILD="$BUILDER_COMMON_FLAGS" \
-    CXXFLAGS_FOR_BUILD="$BUILDER_COMMON_FLAGS" \
-    "$command_name" "$@"
+  env_args+=("${TARGET_POLICY_ENV[@]}")
+  env "${env_args[@]}" "$command_name" "$@"
 }
 
 cross_emerge() {
@@ -1000,6 +1043,7 @@ prepare_builder_from_snapshot() {
   apply_target_portage_config
   create_builder_wrappers
   create_target_wrappers
+  load_target_policy_env
 
   printf '[portageforge] builder CBUILD: %s\n' "$BUILDER_CHOST"
   printf '[portageforge] target CHOST: %s\n' "$TARGET_CHOST"

@@ -286,11 +286,17 @@ root persist; the target sysroot does not.
 
 PortageForge does not treat the builder's `@world` as the target machine and
 does not apply target CPU flags to builder-native packages. Builder-native
-packages are prepared under `/`. Target build dependencies are installed with
-`--emptytree --onlydeps` so stage3's preinstalled package database does not
-decide target-policy USE or Python slot transitions. Target package outputs are
-merged under `ROOT=<target sysroot>` with `SYSROOT=<target sysroot>` and the
-target snapshot's `/etc/portage` policy. Native `BDEPEND` tools resolve against
+packages are prepared under `/`. During target builds, PortageForge projects
+safe target policy variables such as `ACCEPT_KEYWORDS`, `ACCEPT_LICENSE`, and
+Python/Lua/Ruby target selections into the emerge environment so native
+`BDEPEND` tools can satisfy the target graph. It does not project target
+compiler flags or CPU flags into builder-native packages.
+
+Target build dependencies are installed with `--emptytree --onlydeps` so
+stage3's preinstalled package database does not decide target-policy USE or
+Python slot transitions. Target package outputs are merged under
+`ROOT=<target sysroot>` with `SYSROOT=<target sysroot>` and the target
+snapshot's `/etc/portage` policy. Native `BDEPEND` tools resolve against
 `BROOT=/`; target `DEPEND` and `RDEPEND` resolve against the target sysroot.
 
 `PKGDIR`, `DISTDIR`, and `PORTAGE_TMPDIR` are prepared as writable directories
