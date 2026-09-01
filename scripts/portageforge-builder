@@ -860,15 +860,31 @@ append_target_portage_config_path() {
 
 append_target_use_expand_policy() {
   local destination=$1
+  local positive_values
   local value
   local variable_name
 
   for variable_name in PYTHON_TARGETS PYTHON_SINGLE_TARGET RUBY_TARGETS LUA_TARGETS LUA_SINGLE_TARGET; do
     value=$(target_policy_value "$variable_name")
-    if [[ -n "$value" ]]; then
-      printf '*/* %s: %s\n' "$variable_name" "$value" >>"$destination"
+    positive_values=$(positive_policy_tokens "$value")
+    if [[ -n "$positive_values" ]]; then
+      printf '*/* %s: -* %s\n' "$variable_name" "$positive_values" >>"$destination"
     fi
   done
+}
+
+positive_policy_tokens() {
+  local token
+  local tokens=()
+  local value=$1
+
+  for token in $value; do
+    if [[ "$token" != -* ]]; then
+      tokens+=("$token")
+    fi
+  done
+
+  printf '%s\n' "${tokens[*]}"
 }
 
 write_builder_accept_keywords_overlay() {

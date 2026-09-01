@@ -295,12 +295,12 @@ packages.
 For `BROOT=/` dependencies, PortageForge also writes temporary builder-root
 policy overlays named `zz-portageforge-target-policy-*` under
 `/etc/portage/package.accept_keywords` and `/etc/portage/package.use`. These
-project target keyword acceptance, such as `~amd64`, plus language USE_EXPAND
-selections such as `PYTHON_TARGETS`, so native build tools such as
-`wayland-scanner` and Python build backends can satisfy the target graph without
-changing builder compiler flags. Target `package.use` is not mirrored into the
-builder root. The overlays are cleared before builder-native `@world` updates
-and recreated for each target.
+project target keyword acceptance, such as `~amd64`, plus exact language
+USE_EXPAND selections such as `PYTHON_TARGETS: -* python3_13`, so native build
+tools such as `wayland-scanner` and Python build backends can satisfy the target
+graph without inheriting the builder profile's default language slots. Target
+`package.use` is not mirrored into the builder root. The overlays are cleared
+before builder-native `@world` updates and recreated for each target.
 
 Target build dependencies are installed with `--emptytree --onlydeps` so
 stage3's preinstalled package database does not decide target-policy USE or
