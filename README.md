@@ -298,19 +298,19 @@ builder bridge for native `BDEPEND` tools. It does not project target compiler
 flags, CPU flags, `CHOST`, `CFLAGS`, `CXXFLAGS`, or package environment files
 into builder-native packages.
 
-For `BROOT=/` dependencies, PortageForge also writes temporary builder-root
-policy overlays named `zz-portageforge-target-policy-*` under
-`/etc/portage/package.accept_keywords` and `/etc/portage/package.use`. These
-project target keyword acceptance, such as `~amd64`, the target's raw global
-`USE` assignment, target `package.use`, and selected target USE_EXPAND policy.
-PortageForge discovers the target's `USE_EXPAND` variables and bridges
-target-selector names ending in `TARGET`, `TARGETS`, `SINGLE_TARGET`, or
-`SINGLE_TARGETS`, such as `PYTHON_TARGETS`, `LUA_SINGLE_TARGET`,
-`GUILE_TARGETS`, or `LLVM_TARGETS`. This lets native build tools such as
-`wayland-scanner`, GTK helpers, and Python build backends satisfy the target
-graph without inheriting the builder profile's feature defaults. The overlays
-are cleared before builder-native `@world` updates and recreated for each
-target.
+For `BROOT=/` dependencies, PortageForge projects the target's raw global
+`USE`, keyword acceptance such as `~amd64`, and selected target USE_EXPAND
+policy through the cross-emerge environment. It discovers the target's
+`USE_EXPAND` variables and bridges target-selector names ending in `TARGET`,
+`TARGETS`, `SINGLE_TARGET`, or `SINGLE_TARGETS`, such as `PYTHON_TARGETS`,
+`LUA_SINGLE_TARGET`, `GUILE_TARGETS`, or `LLVM_TARGETS`. PortageForge also
+writes temporary builder-root policy overlays named
+`zz-portageforge-target-policy-*` under `/etc/portage/package.accept_keywords`
+and `/etc/portage/package.use` for the target's package-specific keyword and
+USE files. This lets native build tools such as `wayland-scanner`, GTK helpers,
+and Python build backends satisfy the target graph without inheriting the
+builder profile's feature defaults. The overlays are cleared before
+builder-native `@world` updates and recreated for each target.
 
 Target build dependencies are installed with `--emptytree --onlydeps` so
 stage3's preinstalled package database does not decide target-policy USE or
