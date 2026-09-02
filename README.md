@@ -217,12 +217,18 @@ The QEMU launcher also accepts:
 PORTAGEFORGE_QEMU_ACCEL=kvm
 PORTAGEFORGE_QEMU_CPU=host
 PORTAGEFORGE_MEMORY_MB=16384
+PORTAGEFORGE_HOST_SSH_BIND=127.0.0.1
 PORTAGEFORGE_HOST_SSH_PORT=2222
+PORTAGEFORGE_HOST_BINHOST_BIND=127.0.0.1
 PORTAGEFORGE_HOST_BINHOST_PORT=8080
 ```
 
 Using KVM is fine for true-cross mode because target package binaries are not
 executed by the builder.
+
+The QEMU host forwards bind to `127.0.0.1` by default. To intentionally expose
+the SSH or binhost ports to other machines, set the corresponding
+`PORTAGEFORGE_HOST_*_BIND` value to the host address you want to listen on.
 
 ## Run The Builder
 
@@ -242,7 +248,7 @@ tail -f /var/log/portageforge-builder.log
 The builder serves each target binhost at:
 
 ```text
-http://<qemu-host>:8080/targets/<target-hostname>/binpkgs/
+http://127.0.0.1:8080/targets/<target-hostname>/binpkgs/
 ```
 
 ## Builder Behavior
@@ -295,12 +301,17 @@ packages.
 For `BROOT=/` dependencies, PortageForge also writes temporary builder-root
 policy overlays named `zz-portageforge-target-policy-*` under
 `/etc/portage/package.accept_keywords` and `/etc/portage/package.use`. These
-project target keyword acceptance, such as `~amd64`, plus exact language
-USE_EXPAND selections such as `PYTHON_TARGETS: -* python3_13`, so native build
-tools such as `wayland-scanner` and Python build backends can satisfy the target
-graph without inheriting the builder profile's default language slots. Target
-`package.use` is not mirrored into the builder root. The overlays are cleared
-before builder-native `@world` updates and recreated for each target.
+project target keyword acceptance, such as `~amd64`, plus selected target
+USE_EXPAND policy. PortageForge discovers the target's `USE_EXPAND` variables
+and bridges target-selector names ending in `TARGET`, `TARGETS`,
+`SINGLE_TARGET`, or `SINGLE_TARGETS`, such as `PYTHON_TARGETS`,
+`LUA_SINGLE_TARGET`, `GUILE_TARGETS`, or `LLVM_TARGETS`. This lets native build
+tools such as `wayland-scanner` and Python build backends satisfy the target
+graph without inheriting the builder profile's default target-selector slots.
+Target `package.use` is not mirrored into the builder root. It is preserved in
+the target sysroot, where package-specific target output policy belongs. The
+overlays are cleared before builder-native `@world` updates and recreated for
+each target.
 
 Target build dependencies are installed with `--emptytree --onlydeps` so
 stage3's preinstalled package database does not decide target-policy USE or
@@ -308,6 +319,8 @@ Python slot transitions. Target package outputs are merged under
 `ROOT=<target sysroot>` with `SYSROOT=<target sysroot>` and the target
 snapshot's `/etc/portage` policy. Native `BDEPEND` tools resolve against
 `BROOT=/`; target `DEPEND` and `RDEPEND` resolve against the target sysroot.
+Cross emerges use `--autounmask=n`; missing USE, keyword, or USE_EXPAND target
+policy must be fixed on the target and exported again.
 
 `PKGDIR`, `DISTDIR`, and `PORTAGE_TMPDIR` are prepared as writable directories
 for the VM's `portage` user before each target build. This matters because
@@ -323,8 +336,11 @@ On each target Gentoo machine:
 # /etc/portage/binrepos.conf/portageforge.conf
 [portageforge]
 priority = 50
-sync-uri = http://<qemu-host>:8080/targets/<target-hostname>/binpkgs/
+sync-uri = http://127.0.0.1:8080/targets/<target-hostname>/binpkgs/
 ```
+
+If the target is not the same host running QEMU, expose or proxy the binhost
+deliberately and use that reachable address instead.
 
 To prefer this binhost by default:
 
@@ -384,9 +400,19 @@ sure the generated `portageforge-builder.service` does not include
 `After=cloud-final.service`, then rerun `make setup` so `images/seed.iso`
 contains the fixed unit.
 
-If dependency resolution reports package-specific USE or `PYTHON_TARGETS`
+If dependency resolution reports package-specific USE or USE_EXPAND
 constraints, update the target's `/etc/portage` policy and export a fresh
 target snapshot.
+
+For packages that need incompatible Lua implementations, keep that policy
+package-specific on the target instead of forcing one global Lua target for
+everything:
+
+```conf
+# /etc/portage/package.use/lua
+media-video/wireplumber LUA_SINGLE_TARGET: -* lua5-4
+app-editors/neovim LUA_SINGLE_TARGET: -* luajit
+```
 
 Expect the first rough edges around:
 

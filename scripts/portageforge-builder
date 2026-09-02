@@ -31,14 +31,7 @@ PKGDIR_PATH=
 DISTDIR_PATH=
 PORTAGE_TMPDIR_PATH=
 TARGET_POLICY_VALUES=()
-TARGET_POLICY_VARIABLES=(
-  ACCEPT_KEYWORDS
-  PYTHON_TARGETS
-  PYTHON_SINGLE_TARGET
-  RUBY_TARGETS
-  LUA_TARGETS
-  LUA_SINGLE_TARGET
-)
+TARGET_BROOT_USE_EXPAND_VARIABLES=()
 if [[ "$CPU_COUNT" -gt 1 ]]; then
   DEFAULT_BUILD_JOBS=$((CPU_COUNT - 1))
 else
@@ -47,6 +40,7 @@ fi
 BUILD_JOBS=${PORTAGEFORGE_BUILD_JOBS:-$DEFAULT_BUILD_JOBS}
 CROSS_RESOLVER_ARGS=(
   --backtrack=100
+  --autounmask=n
   --verbose-conflicts
 )
 
@@ -773,6 +767,20 @@ target_portage_envvar() {
   fi
 }
 
+read_target_portage_value() {
+  local value
+  local variable_name=$1
+
+  if ! value=$(target_portage_envvar "$variable_name"); then
+    return 1
+  fi
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    printf '[portageforge] error: target Portage variable contains a newline and cannot be projected safely: %s\n' "$variable_name" >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
 target_policy_value() {
   local entry
   local variable_name=$1
@@ -785,6 +793,38 @@ target_policy_value() {
   done
 }
 
+is_broot_use_expand_variable_name() {
+  local variable_name=$1
+
+  case "$variable_name" in
+    ""|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*)
+      return 1
+      ;;
+    TARGET|TARGETS|SINGLE_TARGET|SINGLE_TARGETS|*_TARGET|*_TARGETS|*_SINGLE_TARGET|*_SINGLE_TARGETS)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+load_target_use_expand_variables() {
+  local use_expand
+  local variable_name
+
+  TARGET_BROOT_USE_EXPAND_VARIABLES=()
+  if ! use_expand=$(read_target_portage_value USE_EXPAND); then
+    return 1
+  fi
+
+  for variable_name in $use_expand; do
+    if is_broot_use_expand_variable_name "$variable_name"; then
+      TARGET_BROOT_USE_EXPAND_VARIABLES+=("$variable_name")
+    fi
+  done
+}
+
 load_target_policy_values() {
   local loaded=()
   local policy_values=()
@@ -792,16 +832,22 @@ load_target_policy_values() {
   local variable_name
 
   TARGET_POLICY_VALUES=()
-  for variable_name in "${TARGET_POLICY_VARIABLES[@]}"; do
-    if ! value=$(target_portage_envvar "$variable_name"); then
+  load_target_use_expand_variables || return 1
+
+  if ! value=$(read_target_portage_value ACCEPT_KEYWORDS); then
+    return 1
+  fi
+  if [[ -n "$value" ]]; then
+    policy_values+=("ACCEPT_KEYWORDS=$value")
+    loaded+=(ACCEPT_KEYWORDS)
+  fi
+
+  for variable_name in "${TARGET_BROOT_USE_EXPAND_VARIABLES[@]}"; do
+    if ! value=$(read_target_portage_value "$variable_name"); then
       return 1
     fi
     if [[ -z "$value" ]]; then
       continue
-    fi
-    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
-      printf '[portageforge] error: target Portage variable contains a newline and cannot be projected safely: %s\n' "$variable_name" >&2
-      return 1
     fi
     policy_values+=("$variable_name=$value")
     loaded+=("$variable_name")
@@ -810,6 +856,9 @@ load_target_policy_values() {
   TARGET_POLICY_VALUES=("${policy_values[@]}")
   if [[ "${#loaded[@]}" -gt 0 ]]; then
     printf '[portageforge] loaded target policy bridge values for native build dependencies: %s\n' "${loaded[*]}"
+  fi
+  if [[ "${#TARGET_BROOT_USE_EXPAND_VARIABLES[@]}" -gt 0 ]]; then
+    printf '[portageforge] selected target USE_EXPAND bridge variables: %s\n' "${TARGET_BROOT_USE_EXPAND_VARIABLES[*]}"
   fi
 }
 
@@ -864,7 +913,7 @@ append_target_use_expand_policy() {
   local value
   local variable_name
 
-  for variable_name in PYTHON_TARGETS PYTHON_SINGLE_TARGET RUBY_TARGETS LUA_TARGETS LUA_SINGLE_TARGET; do
+  for variable_name in "${TARGET_BROOT_USE_EXPAND_VARIABLES[@]}"; do
     value=$(target_policy_value "$variable_name")
     positive_values=$(positive_policy_tokens "$value")
     if [[ -n "$positive_values" ]]; then
@@ -924,7 +973,7 @@ apply_builder_target_policy_overlay() {
   clear_builder_target_policy_overlays
   write_builder_accept_keywords_overlay
   write_builder_package_use_overlay
-  printf '[portageforge] applied target keyword and language overlays for native BROOT dependencies\n'
+  printf '[portageforge] applied target keyword and selected USE_EXPAND overlays for native BROOT dependencies\n'
 }
 
 validate_tool_wrappers() {

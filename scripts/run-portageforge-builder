@@ -13,7 +13,9 @@ MEMORY_MB=${PORTAGEFORGE_MEMORY_MB:-8192}
 CPU_MODEL=${PORTAGEFORGE_QEMU_CPU:-max}
 QEMU_ACCEL=${PORTAGEFORGE_QEMU_ACCEL:-tcg,thread=multi}
 SSH_PORT=${PORTAGEFORGE_HOST_SSH_PORT:-2222}
+SSH_HOST_BIND=${PORTAGEFORGE_HOST_SSH_BIND:-127.0.0.1}
 BINHOST_HOST_PORT=${PORTAGEFORGE_HOST_BINHOST_PORT:-8080}
+BINHOST_HOST_BIND=${PORTAGEFORGE_HOST_BINHOST_BIND:-127.0.0.1}
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 CPU_COUNT=$(nproc 2>/dev/null || printf '1')
 if [[ "$CPU_COUNT" -gt 1 ]]; then
@@ -61,7 +63,7 @@ qemu_args=(
   -virtfs "local,path=$TARGETS_DIR,mount_tag=portageforge-targets,security_model=none,readonly=on"
   -virtfs "local,path=$DATA_DIR,mount_tag=portageforge-data,security_model=mapped-xattr"
   -device virtio-net-pci,netdev=net0
-  -netdev "user,id=net0,hostfwd=tcp::${SSH_PORT}-:22,hostfwd=tcp::${BINHOST_HOST_PORT}-:8080"
+  -netdev "user,id=net0,hostfwd=tcp:${SSH_HOST_BIND}:${SSH_PORT}-:22,hostfwd=tcp:${BINHOST_HOST_BIND}:${BINHOST_HOST_PORT}-:8080"
   -serial mon:stdio
   -display none
   -drive "file=$SEED_ISO,if=ide,media=cdrom,readonly=on"
