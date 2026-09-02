@@ -293,25 +293,24 @@ root persist; the target sysroot does not.
 PortageForge does not treat the builder's `@world` as the target machine and
 does not apply target CPU flags to builder-native packages. Builder-native
 packages are prepared under `/`. During target builds, PortageForge keeps the
-target `/etc/portage` policy on the target sysroot and uses only a narrow
+target `/etc/portage` policy on the target sysroot and uses a temporary
 builder bridge for native `BDEPEND` tools. It does not project target compiler
-flags, CPU flags, global `USE`, or desktop package policy into builder-native
-packages.
+flags, CPU flags, `CHOST`, `CFLAGS`, `CXXFLAGS`, or package environment files
+into builder-native packages.
 
 For `BROOT=/` dependencies, PortageForge also writes temporary builder-root
 policy overlays named `zz-portageforge-target-policy-*` under
 `/etc/portage/package.accept_keywords` and `/etc/portage/package.use`. These
-project target keyword acceptance, such as `~amd64`, plus selected target
-USE_EXPAND policy. PortageForge discovers the target's `USE_EXPAND` variables
-and bridges target-selector names ending in `TARGET`, `TARGETS`,
-`SINGLE_TARGET`, or `SINGLE_TARGETS`, such as `PYTHON_TARGETS`,
-`LUA_SINGLE_TARGET`, `GUILE_TARGETS`, or `LLVM_TARGETS`. This lets native build
-tools such as `wayland-scanner` and Python build backends satisfy the target
-graph without inheriting the builder profile's default target-selector slots.
-Target `package.use` is not mirrored into the builder root. It is preserved in
-the target sysroot, where package-specific target output policy belongs. The
-overlays are cleared before builder-native `@world` updates and recreated for
-each target.
+project target keyword acceptance, such as `~amd64`, the target's raw global
+`USE` assignment, target `package.use`, and selected target USE_EXPAND policy.
+PortageForge discovers the target's `USE_EXPAND` variables and bridges
+target-selector names ending in `TARGET`, `TARGETS`, `SINGLE_TARGET`, or
+`SINGLE_TARGETS`, such as `PYTHON_TARGETS`, `LUA_SINGLE_TARGET`,
+`GUILE_TARGETS`, or `LLVM_TARGETS`. This lets native build tools such as
+`wayland-scanner`, GTK helpers, and Python build backends satisfy the target
+graph without inheriting the builder profile's feature defaults. The overlays
+are cleared before builder-native `@world` updates and recreated for each
+target.
 
 Target build dependencies are installed with `--emptytree --onlydeps` so
 stage3's preinstalled package database does not decide target-policy USE or

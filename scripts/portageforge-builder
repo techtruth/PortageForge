@@ -30,6 +30,7 @@ TARGET_WRAPPERS_DIR=
 PKGDIR_PATH=
 DISTDIR_PATH=
 PORTAGE_TMPDIR_PATH=
+TARGET_GLOBAL_USE=
 TARGET_POLICY_VALUES=()
 TARGET_BROOT_USE_EXPAND_VARIABLES=()
 if [[ "$CPU_COUNT" -gt 1 ]]; then
@@ -781,6 +782,31 @@ read_target_portage_value() {
   printf '%s\n' "$value"
 }
 
+read_target_make_conf_value() {
+  local make_conf_path="$TARGET_ROOT/etc/portage/make.conf"
+  local value
+  local variable_name=$1
+
+  if ! value=$(python3 -c '
+import portage.util
+import sys
+
+config = portage.util.getconfig(sys.argv[1], expand=True) or {}
+value = config.get(sys.argv[2], "")
+if "\n" in value or "\r" in value:
+    raise SystemExit(2)
+print(value)
+' "$make_conf_path" "$variable_name"); then
+    printf '[portageforge] error: could not read target make.conf variable: %s\n' "$variable_name" >&2
+    return 1
+  fi
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    printf '[portageforge] error: target make.conf variable contains a newline and cannot be projected safely: %s\n' "$variable_name" >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
 target_policy_value() {
   local entry
   local variable_name=$1
@@ -832,7 +858,15 @@ load_target_policy_values() {
   local variable_name
 
   TARGET_POLICY_VALUES=()
+  TARGET_GLOBAL_USE=
   load_target_use_expand_variables || return 1
+
+  if ! TARGET_GLOBAL_USE=$(read_target_make_conf_value USE); then
+    return 1
+  fi
+  if [[ -n "$TARGET_GLOBAL_USE" ]]; then
+    loaded+=(USE)
+  fi
 
   if ! value=$(read_target_portage_value ACCEPT_KEYWORDS); then
     return 1
@@ -922,6 +956,15 @@ append_target_use_expand_policy() {
   done
 }
 
+append_target_global_use_policy() {
+  local destination=$1
+
+  if [[ -n "$TARGET_GLOBAL_USE" ]]; then
+    printf '# raw target global USE projected for BROOT dependencies\n' >>"$destination"
+    printf '*/* %s\n' "$TARGET_GLOBAL_USE" >>"$destination"
+  fi
+}
+
 positive_policy_tokens() {
   local token
   local tokens=()
@@ -962,7 +1005,9 @@ write_builder_package_use_overlay() {
   destination=$(builder_overlay_file package.use)
   : >"$destination"
 
+  append_target_global_use_policy "$destination"
   append_target_use_expand_policy "$destination"
+  append_target_portage_config_path "$destination" package.use
 
   if [[ ! -s "$destination" ]]; then
     rm -f "$destination"
@@ -973,7 +1018,7 @@ apply_builder_target_policy_overlay() {
   clear_builder_target_policy_overlays
   write_builder_accept_keywords_overlay
   write_builder_package_use_overlay
-  printf '[portageforge] applied target keyword and selected USE_EXPAND overlays for native BROOT dependencies\n'
+  printf '[portageforge] applied target keyword, USE, package.use, and selected USE_EXPAND overlays for native BROOT dependencies\n'
 }
 
 validate_tool_wrappers() {
