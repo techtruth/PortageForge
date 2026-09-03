@@ -852,7 +852,9 @@ load_target_policy_values() {
   fi
   for variable_name in $use_expand; do
     is_broot_use_expand_variable_name "$variable_name" || continue
-    value=$(cross_run portageq envvar "$variable_name") || continue
+    if ! value=$(read_target_make_conf_value "$variable_name"); then
+      return 1
+    fi
     if [[ -z "$value" || "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
       continue
     fi
@@ -1244,7 +1246,17 @@ build_target() {
   fi
 
   if [[ "$result" -eq 0 ]]; then
-    apply_target_portage_config
+    apply_target_portage_config || result=1
+  fi
+
+  if [[ "$result" -eq 0 ]]; then
+    if ! load_target_policy_values || ! apply_builder_target_policy_overlay; then
+      printf '[portageforge] error: target policy bridge refresh failed for %s\n' "$TARGET_NAME" >&2
+      result=1
+    fi
+  fi
+
+  if [[ "$result" -eq 0 ]]; then
     if ! validate_tool_wrappers; then
       printf '[portageforge] error: wrapper validation failed for %s\n' "$TARGET_NAME" >&2
       result=1

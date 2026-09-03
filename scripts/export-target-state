@@ -22,7 +22,7 @@ portage_envvar() {
     exit 1
   fi
 
-  portageq envvar "$variable_name" 2>/dev/null || true
+  portageq envvar "$variable_name" || true
 }
 
 validate_explicit_target_flags() {

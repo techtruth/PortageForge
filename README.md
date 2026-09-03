@@ -275,6 +275,7 @@ for each /mnt/portageforge-targets/*.tar:
   append PortageForge cross-build settings
   create CBUILD and CHOST wrapper toolchains
   run emerge --sync with the target config root
+  restore target config again and refresh the BROOT policy bridge
   compile/run builder wrapper probes and compile target wrapper probes
   emptytree-install target build dependencies with BROOT=/ and SYSROOT=<target sysroot>
   emerge the full target package set with --emptytree --buildpkg
@@ -299,12 +300,13 @@ flags, CPU flags, `CHOST`, `CFLAGS`, `CXXFLAGS`, or package environment files
 into builder-native packages.
 
 For `BROOT=/` dependencies, PortageForge projects the target's raw global
-`USE`, keyword acceptance such as `~amd64`, and selected target USE_EXPAND
-policy through the cross-emerge environment. It discovers the target's
-`USE_EXPAND` variables and bridges target-selector names ending in `TARGET`,
-`TARGETS`, `SINGLE_TARGET`, or `SINGLE_TARGETS`, such as `PYTHON_TARGETS`,
-`LUA_SINGLE_TARGET`, `GUILE_TARGETS`, or `LLVM_TARGETS`. PortageForge also
-writes temporary builder-root policy overlays named
+`USE`, keyword acceptance such as `~amd64`, and explicit target make.conf
+USE_EXPAND policy through the cross-emerge environment. It discovers the
+target's `USE_EXPAND` variables and bridges target-selector names ending in
+`TARGET`, `TARGETS`, `SINGLE_TARGET`, or `SINGLE_TARGETS`, such as
+`PYTHON_TARGETS`, `LUA_SINGLE_TARGET`, `GUILE_TARGETS`, or `LLVM_TARGETS`, when
+the target make.conf sets them. PortageForge also writes temporary builder-root
+policy overlays named
 `zz-portageforge-target-policy-*` under `/etc/portage/package.accept_keywords`
 and `/etc/portage/package.use` for the target's package-specific keyword and
 USE files. This lets native build tools such as `wayland-scanner`, GTK helpers,
