@@ -917,12 +917,30 @@ append_target_portage_config_path() {
   done < <(find "$source" -type f | sort)
 }
 
+positive_policy_tokens() {
+  local -a tokens=()
+  local token
+
+  read -r -a tokens <<<"$1"
+  for token in "${tokens[@]}"; do
+    if [[ "$token" != -* ]]; then
+      printf '%s\n' "$token"
+    fi
+  done
+}
+
 write_builder_accept_keywords_overlay() {
+  local accept_keywords
   local destination
 
   destination=$(builder_overlay_file package.accept_keywords)
   : >"$destination"
 
+  accept_keywords=$(target_policy_value ACCEPT_KEYWORDS)
+  if [[ -n "$accept_keywords" ]]; then
+    printf '# global target ACCEPT_KEYWORDS projected for BROOT dependencies\n' >>"$destination"
+    printf '*/* %s\n' "$accept_keywords" >>"$destination"
+  fi
   append_target_portage_config_path "$destination" package.accept_keywords
   append_target_portage_config_path "$destination" package.keywords
 
@@ -932,11 +950,25 @@ write_builder_accept_keywords_overlay() {
 }
 
 write_builder_package_use_overlay() {
+  local -a positive_values=()
   local destination
+  local value
+  local variable_name
 
   destination=$(builder_overlay_file package.use)
   : >"$destination"
 
+  if [[ -n "$TARGET_GLOBAL_USE" ]]; then
+    printf '# global target USE projected for BROOT dependencies\n' >>"$destination"
+    printf '*/* %s\n' "$TARGET_GLOBAL_USE" >>"$destination"
+  fi
+  for variable_name in "${TARGET_BROOT_USE_EXPAND_VARIABLES[@]}"; do
+    value=$(target_policy_value "$variable_name")
+    mapfile -t positive_values < <(positive_policy_tokens "$value")
+    if [[ "${#positive_values[@]}" -gt 0 ]]; then
+      printf '*/* %s: -* %s\n' "$variable_name" "${positive_values[*]}" >>"$destination"
+    fi
+  done
   append_target_portage_config_path "$destination" package.use
 
   if [[ ! -s "$destination" ]]; then
@@ -948,7 +980,7 @@ apply_builder_target_policy_overlay() {
   clear_builder_target_policy_overlays
   write_builder_accept_keywords_overlay
   write_builder_package_use_overlay
-  printf '[portageforge] applied target package.use and package.accept_keywords overlays for native BROOT dependencies\n'
+  printf '[portageforge] applied target USE, keyword, package.use, and selected USE_EXPAND overlays for native BROOT dependencies\n'
 }
 
 validate_tool_wrappers() {
@@ -1058,13 +1090,6 @@ cross_run() {
     CXXFLAGS_FOR_BUILD="$BUILDER_COMMON_FLAGS"
   )
   shift
-
-  if [[ -n "$TARGET_GLOBAL_USE" ]]; then
-    env_args+=(USE="$TARGET_GLOBAL_USE")
-  fi
-  if [[ "${#TARGET_POLICY_VALUES[@]}" -gt 0 ]]; then
-    env_args+=("${TARGET_POLICY_VALUES[@]}")
-  fi
 
   env "${env_args[@]}" "$command_name" "$@"
 }
