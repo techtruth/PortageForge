@@ -527,6 +527,7 @@ restore_snapshot_path() {
   source="$TARGET_ROOT/$relative_path"
   destination="$TARGET_SYSROOT_PATH/$relative_path"
   if [[ -e "$source" || -L "$source" ]]; then
+    printf '[portageforge] restoring target %s\n' "$relative_path"
     mkdir -p "$(dirname "$destination")"
     rm -rf "$destination"
     cp -a "$source" "$destination"
@@ -605,19 +606,25 @@ validate_microarchitecture_only_target() {
 
 apply_target_portage_config() {
   printf '[portageforge] applying target /etc/portage snapshot to sysroot\n'
+  printf '[portageforge] restoring target Portage config tree\n'
   rm -rf "$TARGET_SYSROOT_PATH/etc/portage"
   mkdir -p "$TARGET_SYSROOT_PATH/etc"
   cp -a "$TARGET_ROOT/etc/portage" "$TARGET_SYSROOT_PATH/etc/portage"
+  printf '[portageforge] writing target package set\n'
   rm -f "$TARGET_SYSROOT_PATH$TARGET_PACKAGE_SET"
   load_target_package_set "$TARGET_PACKAGE_LIST"
   if [[ ! -s "$TARGET_SYSROOT_PATH$TARGET_PACKAGE_SET" ]]; then
     printf '[portageforge] error: target package list has no package entries: %s\n' "$TARGET_PACKAGE_LIST" >&2
     exit 1
   fi
+  printf '[portageforge] writing target make.conf and profile\n'
   write_target_make_conf
   set_target_profile_link "$(metadata_value profile)"
+  printf '[portageforge] restoring target runtime environment state\n'
   restore_target_environment_state
+  printf '[portageforge] validating target Portage flags\n'
   validate_no_native_flags
+  printf '[portageforge] target Portage snapshot applied\n'
 }
 
 command_path() {
