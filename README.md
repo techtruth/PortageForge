@@ -301,16 +301,15 @@ environment files stay on the target side.
 For `BROOT=/` dependencies, PortageForge writes temporary builder-root policy
 overlays named `zz-portageforge-target-policy-*` under
 `/etc/portage/package.accept_keywords` and `/etc/portage/package.use`. These
-project the target's raw global `USE`, keyword acceptance such as `~amd64`,
-target package-specific keyword and USE files, and explicit target make.conf
-USE_EXPAND policy. PortageForge discovers the target's `USE_EXPAND` variables
-and bridges target-selector names ending in `TARGET`, `TARGETS`,
-`SINGLE_TARGET`, or `SINGLE_TARGETS`, such as `PYTHON_TARGETS`,
-`LUA_SINGLE_TARGET`, `GUILE_TARGETS`, or `LLVM_TARGETS`, when the target
-make.conf sets them. This lets native build tools such as `wayland-scanner`,
-GTK helpers, and Python build backends satisfy the target graph without
-inheriting the builder profile's feature defaults. The overlays are cleared
-before builder runtime updates and recreated for each target.
+project target keyword acceptance such as `~amd64`, target package-specific
+keyword and USE files, and explicit non-CPU target make.conf `USE_EXPAND`
+policy such as `VIDEO_CARDS`, `LLVM_TARGETS`, `PYTHON_TARGETS`, and
+`PYTHON_SINGLE_TARGET`. Target global `USE` is not projected into BROOT,
+because it can conflict with flags forced by the builder runtime profile. This
+lets native build tools such as `wayland-scanner`, Mesa helpers, GTK helpers,
+and Python build backends satisfy the target graph without inheriting unrelated
+target compiler or CPU policy. The overlays are cleared before builder runtime
+updates and recreated for each target.
 
 Target build dependencies are installed with `--emptytree --onlydeps` so
 stage3's preinstalled package database does not decide target-policy USE or

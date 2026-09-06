@@ -30,7 +30,6 @@ TARGET_WRAPPERS_DIR=
 PKGDIR_PATH=
 DISTDIR_PATH=
 PORTAGE_TMPDIR_PATH=
-TARGET_GLOBAL_USE=
 TARGET_POLICY_VALUES=()
 TARGET_BROOT_USE_EXPAND_VARIABLES=()
 if [[ "$CPU_COUNT" -gt 1 ]]; then
@@ -820,11 +819,11 @@ is_broot_use_expand_variable_name() {
     ""|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*)
       return 1
       ;;
-    TARGET|TARGETS|SINGLE_TARGET|SINGLE_TARGETS|*_TARGET|*_TARGETS|*_SINGLE_TARGET|*_SINGLE_TARGETS)
-      return 0
+    ABI_*|CPU_FLAGS_*|ELIBC|KERNEL|USERLAND)
+      return 1
       ;;
     *)
-      return 1
+      return 0
       ;;
   esac
 }
@@ -837,15 +836,7 @@ load_target_policy_values() {
   local variable_name
 
   TARGET_POLICY_VALUES=()
-  TARGET_GLOBAL_USE=
   TARGET_BROOT_USE_EXPAND_VARIABLES=()
-
-  if ! TARGET_GLOBAL_USE=$(read_target_make_conf_value USE); then
-    return 1
-  fi
-  if [[ -n "$TARGET_GLOBAL_USE" ]]; then
-    loaded+=(USE)
-  fi
 
   if ! value=$(read_target_portage_value ACCEPT_KEYWORDS); then
     return 1
@@ -966,10 +957,6 @@ write_builder_package_use_overlay() {
   destination=$(builder_overlay_file package.use)
   : >"$destination"
 
-  if [[ -n "$TARGET_GLOBAL_USE" ]]; then
-    printf '# global target USE projected for BROOT dependencies\n' >>"$destination"
-    printf '*/* %s\n' "$TARGET_GLOBAL_USE" >>"$destination"
-  fi
   for variable_name in "${TARGET_BROOT_USE_EXPAND_VARIABLES[@]}"; do
     value=$(target_policy_value "$variable_name")
     mapfile -t positive_values < <(positive_policy_tokens "$value")
@@ -988,7 +975,7 @@ apply_builder_target_policy_overlay() {
   clear_builder_target_policy_overlays
   write_builder_accept_keywords_overlay
   write_builder_package_use_overlay
-  printf '[portageforge] applied target USE, keyword, package.use, and selected USE_EXPAND overlays for native BROOT dependencies\n'
+  printf '[portageforge] applied target keyword, package.use, and selected USE_EXPAND overlays for native BROOT dependencies\n'
 }
 
 validate_tool_wrappers() {
