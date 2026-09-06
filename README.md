@@ -58,7 +58,7 @@ The builder creates two wrapper toolchain views:
 x86_64-portageforge-linux-gnu-gcc
   builder-side compiler name
   runs on the builder
-  uses builder-safe flags
+  produces builder-runnable helper binaries
 
 x86_64-pc-linux-gnu-gcc
   target-side compiler name
@@ -70,7 +70,7 @@ x86_64-pc-linux-gnu-gcc
 That makes cross-aware ebuilds do the important split:
 
 ```text
-build helper binaries -> CBUILD wrappers, builder-safe
+build helper binaries -> CBUILD wrappers, builder-runnable
 installed package code -> CHOST wrappers, target-optimized
 ```
 
@@ -79,8 +79,7 @@ The target `CHOST` stays normal, so target machines do not need a custom
 
 On startup, the builder syncs the builder repository, verifies that the builder
 already has the native commands needed to build packages, then updates the
-builder root from source with the builder's own Portage policy and builder-safe
-flags.
+builder root from source.
 
 After repository sync, the builder runs wrapper probes before starting package
 builds. Builder-side probes are compiled and executed. Target-side probes are
@@ -118,11 +117,12 @@ etc/portage/
 usr/src/linux                   # when present
 ```
 
-The package sidecar contains repo-qualified package entries derived from the
-target's installed package database, such as `category/package::gentoo`.
-`::gentoo` package entries are active by default; non-`::gentoo` entries are
-preserved but commented out. To build additional packages for a target, add or
-uncomment repo-qualified entries in that target's `*.packages` file.
+The package sidecar contains the target's selected package roots from
+`/var/lib/portage/world`. PortageForge also builds `@system` and the dependency
+closure, so dependency packages are not forced into the resolver as independent
+top-level requests. To build additional packages for a target, add package atoms
+to that target's `*.packages` file or add them to the target's world file before
+exporting.
 
 True-cross snapshots reject `-march=native` and `-mtune=native`. Use explicit
 target flags instead:
@@ -258,8 +258,8 @@ On VM startup, PortageForge does this:
 ```text
 mount host vm/targets at /mnt/portageforge-targets
 mount host vm/data at /mnt/portageforge-data
-validate builder-native build commands
-source-update builder-native @world with builder policy
+validate builder build commands
+update the builder runtime @world
 start the HTTP binhost server
 ```
 
@@ -271,14 +271,15 @@ for each /mnt/portageforge-targets/*.tar:
   confirm the target CHOST matches the builder GCC target
   recreate /var/lib/portageforge/targets/<target>/sysroot from stage3
   prepare binpkg, distfiles, and Portage temp directories for the portage user
-  restore the target /etc/portage policy into that sysroot
+  copy the target /etc/portage policy into that sysroot
   append PortageForge cross-build settings
   create CBUILD and CHOST wrapper toolchains
   run emerge --sync with the target config root
-  restore target config again and refresh the BROOT policy bridge
+  select the target profile from the synced repository
+  create the BROOT policy bridge for native build dependencies
   compile/run builder wrapper probes and compile target wrapper probes
-  emptytree-install target build dependencies with BROOT=/ and SYSROOT=<target sysroot>
-  emerge the full target package set with --emptytree --buildpkg
+  emptytree-install target build dependencies for @system and the target package roots
+  emerge @system and the target package roots with --emptytree --buildpkg
   run emaint binhost --fix for the target PKGDIR
 sleep 24 hours
 ```
@@ -291,13 +292,11 @@ each target build so stale packages from earlier resolver attempts cannot stay
 installed and poison slot transitions. The binpkg cache, distfiles, and builder
 root persist; the target sysroot does not.
 
-PortageForge does not treat the builder's `@world` as the target machine and
-does not apply target CPU flags to builder-native packages. Builder-native
-packages are prepared under `/`. During target builds, PortageForge keeps the
-target `/etc/portage` policy on the target sysroot and uses a temporary
-builder bridge for native `BDEPEND` tools. It does not project target compiler
-flags, CPU flags, `CHOST`, `CFLAGS`, `CXXFLAGS`, or package environment files
-into builder-native packages.
+PortageForge keeps the builder root as a normal builder runtime under `/`.
+During target builds, it keeps the target `/etc/portage` policy on the target
+sysroot and uses a temporary builder bridge for native `BDEPEND` tools. Target
+compiler flags, CPU flags, `CHOST`, `CFLAGS`, `CXXFLAGS`, and package
+environment files stay on the target side.
 
 For `BROOT=/` dependencies, PortageForge writes temporary builder-root policy
 overlays named `zz-portageforge-target-policy-*` under
@@ -311,7 +310,7 @@ and bridges target-selector names ending in `TARGET`, `TARGETS`,
 make.conf sets them. This lets native build tools such as `wayland-scanner`,
 GTK helpers, and Python build backends satisfy the target graph without
 inheriting the builder profile's feature defaults. The overlays are cleared
-before builder-native `@world` updates and recreated for each target.
+before builder runtime updates and recreated for each target.
 
 Target build dependencies are installed with `--emptytree --onlydeps` so
 stage3's preinstalled package database does not decide target-policy USE or

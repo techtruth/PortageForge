@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 out_dir=${1:-vm/targets}
 PORTAGE_DIR=/etc/portage
-PACKAGE_DB=/var/db/pkg
+WORLD_FILE=/var/lib/portage/world
 
 profile_name() {
   if ! command -v eselect >/dev/null 2>&1; then
@@ -74,50 +74,6 @@ safe_name() {
   printf '%s' "${name:-target}"
 }
 
-package_name_from_pf() {
-  local pf=$1
-  local without_build_id
-
-  if [[ "$pf" =~ -[0-9]+$ ]]; then
-    without_build_id=${pf%-[0-9]*}
-    if [[ "$without_build_id" =~ -[0-9] ]]; then
-      pf=$without_build_id
-    fi
-  fi
-
-  printf '%s\n' "${pf%-[0-9]*}"
-}
-
-binhost_package_entries() {
-  local category
-  local pkgdir
-  local pn
-  local pnvr
-  local repository
-
-  if [[ ! -d "$PACKAGE_DB" ]]; then
-    return
-  fi
-
-  for pkgdir in "$PACKAGE_DB"/*/*; do
-    [[ -d "$pkgdir" ]] || continue
-    category=${pkgdir%/*}
-    category=${category##*/}
-    pnvr=${pkgdir##*/}
-    pn=$(package_name_from_pf "$pnvr")
-    if [[ ! -s "$pkgdir/repository" ]]; then
-      printf '[export-target] error: installed package is missing repository metadata: %s/%s\n' "$category" "$pnvr" >&2
-      return 1
-    fi
-    repository=$(awk 'NF { print $1; exit }' "$pkgdir/repository")
-    if [[ -z "$repository" || ! "$repository" =~ ^[A-Za-z0-9._-]+$ ]]; then
-      printf '[export-target] error: installed package has invalid repository metadata: %s/%s\n' "$category" "$pnvr" >&2
-      return 1
-    fi
-    printf '%s/%s::%s\n' "$category" "$pn" "$repository"
-  done | sort -u
-}
-
 copy_if_present() {
   local source=$1
   local destination=$2
@@ -131,58 +87,29 @@ copy_if_present() {
 write_package_list() {
   local destination=$1
   local entry
-  local repository
 
   {
-    printf '# PortageForge target package list\n'
-    printf '# Repositories:\n'
-    for repository in "${REPOSITORIES[@]}"; do
-      if [[ "$repository" == gentoo ]]; then
-        printf '# - %s (active)\n' "$repository"
-      else
-        printf '# - %s (commented out)\n' "$repository"
-      fi
-    done
+    printf '# PortageForge target package roots\n'
+    printf '# Derived from /var/lib/portage/world on the target.\n'
+    printf '# PortageForge also builds @system and the dependency closure.\n'
     printf '\n'
 
     for entry in "${PACKAGE_ENTRIES[@]}"; do
-      if [[ "$entry" == *::gentoo ]]; then
-        printf '%s\n' "$entry"
-      else
-        printf '# %s\n' "$entry"
-      fi
+      printf '%s\n' "$entry"
     done
   } >"$destination"
 }
 
 load_package_entries() {
   local entries_output
-  local entry
-  local repository
-  declare -A seen_repositories=()
 
-  if ! entries_output=$(binhost_package_entries); then
-    exit 1
-  fi
+  entries_output=$(awk 'NF && $1 !~ /^#/ { print $1 }' "$WORLD_FILE" | sort -u)
   if [[ -z "$entries_output" ]]; then
-    printf '[export-target] error: no binhost package entries found in %s\n' "$PACKAGE_DB" >&2
+    printf '[export-target] error: no target world package entries found in %s\n' "$WORLD_FILE" >&2
     exit 1
   fi
 
   mapfile -t PACKAGE_ENTRIES <<<"$entries_output"
-  for entry in "${PACKAGE_ENTRIES[@]}"; do
-    [[ -n "$entry" ]] || continue
-    repository=${entry##*::}
-    if [[ -z "${seen_repositories[$repository]+set}" ]]; then
-      REPOSITORIES+=("$repository")
-      seen_repositories[$repository]=1
-    fi
-    if [[ "$repository" == gentoo ]]; then
-      active_entries=$((active_entries + 1))
-    fi
-  done
-
-  mapfile -t REPOSITORIES < <(printf '%s\n' "${REPOSITORIES[@]}" | sort -u)
 }
 
 if [[ ! -f "$PORTAGE_DIR/make.conf" ]]; then
@@ -190,8 +117,8 @@ if [[ ! -f "$PORTAGE_DIR/make.conf" ]]; then
   exit 1
 fi
 
-if [[ ! -d "$PACKAGE_DB" ]]; then
-  printf '[export-target] error: package database not found: %s\n' "$PACKAGE_DB" >&2
+if [[ ! -s "$WORLD_FILE" ]]; then
+  printf '[export-target] error: target world file not found or empty: %s\n' "$WORLD_FILE" >&2
   exit 1
 fi
 
@@ -219,11 +146,8 @@ out_file="${out_dir}/${target_hostname}.tar"
 packages_file="${out_dir}/${target_hostname}.packages"
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
-active_entries=0
-commented_entries=0
 snapshot_dir="$tmpdir/snapshot"
 PACKAGE_ENTRIES=()
-REPOSITORIES=()
 
 mkdir -p "$snapshot_dir/etc" "$snapshot_dir/metadata"
 cp -a "$PORTAGE_DIR" "$snapshot_dir/etc/portage"
@@ -236,11 +160,6 @@ copy_if_present /etc/locale.gen "$snapshot_dir/etc/locale.gen"
 copy_if_present /etc/locale.conf "$snapshot_dir/etc/locale.conf"
 copy_if_present /usr/src/linux "$snapshot_dir/usr/src/linux"
 load_package_entries
-commented_entries=$((${#PACKAGE_ENTRIES[@]} - active_entries))
-if [[ "$active_entries" -eq 0 ]]; then
-  printf '[export-target] error: no active ::gentoo package entries found in %s\n' "$PACKAGE_DB" >&2
-  exit 1
-fi
 
 printf '%s\n' "$target_hostname" >"$snapshot_dir/metadata/hostname"
 printf '%s\n' "$profile" >"$snapshot_dir/metadata/profile"
@@ -252,5 +171,4 @@ tar -C "$snapshot_dir" -cf "$out_file" .
 
 printf '[export-target] wrote %s\n' "$out_file" >&2
 printf '[export-target] wrote %s\n' "$packages_file" >&2
-printf '[export-target] captured %s active gentoo package entries\n' "$active_entries" >&2
-printf '[export-target] commented out %s non-gentoo package entries\n' "$commented_entries" >&2
+printf '[export-target] captured %s target world package root(s)\n' "${#PACKAGE_ENTRIES[@]}" >&2

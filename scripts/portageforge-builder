@@ -268,7 +268,7 @@ validate_builder_runtime() {
 }
 
 update_builder_native_system() {
-  printf '[portageforge] updating builder-native packages with builder policy\n'
+  printf '[portageforge] updating builder runtime packages\n'
   builder_emerge \
     --getbinpkg=n \
     --usepkg=n \
@@ -282,13 +282,13 @@ update_builder_native_system() {
 
 prepare_builder_native_system() {
   clear_builder_target_policy_overlays
-  printf '[portageforge] syncing builder repository with builder policy\n'
+  printf '[portageforge] syncing builder repository\n'
   run_with_sync_retries "builder repository sync" builder_emerge --sync
   validate_builder_runtime
   update_builder_native_system
   validate_builder_runtime
 
-  printf '[portageforge] builder-native package preparation complete\n'
+  printf '[portageforge] builder runtime package preparation complete\n'
 }
 
 sanitize_target_name() {
@@ -511,15 +511,16 @@ set_target_profile_link() {
   local profile_path="/var/db/repos/gentoo/profiles/$profile"
 
   if [[ ! -d "$profile_path" ]]; then
-    printf '[portageforge] target profile will be selected after repository sync: %s\n' "$profile"
-    return 0
+    printf '[portageforge] error: target profile not found after repository sync: %s\n' "$profile_path" >&2
+    return 1
   fi
 
+  printf '[portageforge] selecting target profile: %s\n' "$profile"
   rm -rf "$TARGET_SYSROOT_PATH/etc/portage/make.profile"
   ln -s "$profile_path" "$TARGET_SYSROOT_PATH/etc/portage/make.profile"
 }
 
-restore_snapshot_path() {
+copy_snapshot_path() {
   local destination
   local relative_path=$1
   local source
@@ -527,14 +528,14 @@ restore_snapshot_path() {
   source="$TARGET_ROOT/$relative_path"
   destination="$TARGET_SYSROOT_PATH/$relative_path"
   if [[ -e "$source" || -L "$source" ]]; then
-    printf '[portageforge] restoring target %s\n' "$relative_path"
+    printf '[portageforge] copying target %s\n' "$relative_path"
     mkdir -p "$(dirname "$destination")"
     rm -rf "$destination"
     cp -a "$source" "$destination"
   fi
 }
 
-restore_target_environment_state() {
+copy_target_environment_state() {
   local snapshot_path
 
   for snapshot_path in \
@@ -545,7 +546,7 @@ restore_target_environment_state() {
     etc/locale.conf \
     etc/locale.gen \
     usr/src/linux; do
-    restore_snapshot_path "$snapshot_path"
+    copy_snapshot_path "$snapshot_path"
   done
 }
 
@@ -606,10 +607,11 @@ validate_microarchitecture_only_target() {
 
 apply_target_portage_config() {
   printf '[portageforge] applying target /etc/portage snapshot to sysroot\n'
-  printf '[portageforge] restoring target Portage config tree\n'
+  printf '[portageforge] copying target Portage config tree\n'
   rm -rf "$TARGET_SYSROOT_PATH/etc/portage"
   mkdir -p "$TARGET_SYSROOT_PATH/etc"
   cp -a "$TARGET_ROOT/etc/portage" "$TARGET_SYSROOT_PATH/etc/portage"
+  rm -rf "$TARGET_SYSROOT_PATH/etc/portage/make.profile"
   printf '[portageforge] writing target package set\n'
   rm -f "$TARGET_SYSROOT_PATH$TARGET_PACKAGE_SET"
   load_target_package_set "$TARGET_PACKAGE_LIST"
@@ -617,11 +619,10 @@ apply_target_portage_config() {
     printf '[portageforge] error: target package list has no package entries: %s\n' "$TARGET_PACKAGE_LIST" >&2
     exit 1
   fi
-  printf '[portageforge] writing target make.conf and profile\n'
+  printf '[portageforge] writing target make.conf\n'
   write_target_make_conf
-  set_target_profile_link "$(metadata_value profile)"
-  printf '[portageforge] restoring target runtime environment state\n'
-  restore_target_environment_state
+  printf '[portageforge] copying target runtime environment state\n'
+  copy_target_environment_state
   printf '[portageforge] validating target Portage flags\n'
   validate_no_native_flags
   printf '[portageforge] target Portage snapshot applied\n'
@@ -1146,7 +1147,7 @@ emerge_target_packages() {
     --emptytree
     --jobs="$BUILD_JOBS"
   )
-  local targets=(@portageforge-binhost-packages)
+  local targets=(@system @portageforge-binhost-packages)
 
   if ! install_target_build_dependencies "${targets[@]}"; then
     return 1
@@ -1162,6 +1163,7 @@ prepare_builder_from_snapshot() {
   local hostname=
   local profile
 
+  clear_builder_target_policy_overlays
   rm -rf "$TARGET_ROOT"
   mkdir -p "$TARGET_ROOT"
 
@@ -1209,7 +1211,7 @@ prepare_builder_from_snapshot() {
   prepare_target_workdirs
 
   if [[ -d "$TARGET_PACKAGE_LIST" ]]; then
-    printf '[portageforge] error: target package path must be a repo-qualified package file, not a directory: %s\n' "$TARGET_PACKAGE_LIST" >&2
+    printf '[portageforge] error: target package path must be a package-root file, not a directory: %s\n' "$TARGET_PACKAGE_LIST" >&2
     printf '[portageforge] error: re-run make export-target-state on the target to create a single %s file\n' "$TARGET_PACKAGE_LIST" >&2
     exit 1
   fi
@@ -1230,8 +1232,6 @@ prepare_builder_from_snapshot() {
   apply_target_portage_config || return 1
   create_builder_wrappers || return 1
   create_target_wrappers || return 1
-  load_target_policy_values || return 1
-  apply_builder_target_policy_overlay || return 1
 
   printf '[portageforge] builder CBUILD: %s\n' "$BUILDER_CHOST"
   printf '[portageforge] target CHOST: %s\n' "$TARGET_CHOST"
@@ -1277,13 +1277,13 @@ build_target() {
     result=1
   fi
 
-  if [[ "$result" -eq 0 ]]; then
-    apply_target_portage_config || result=1
+  if [[ "$result" -eq 0 ]] && ! set_target_profile_link "$(metadata_value profile)"; then
+    result=1
   fi
 
   if [[ "$result" -eq 0 ]]; then
     if ! load_target_policy_values || ! apply_builder_target_policy_overlay; then
-      printf '[portageforge] error: target policy bridge refresh failed for %s\n' "$TARGET_NAME" >&2
+      printf '[portageforge] error: target policy bridge failed for %s\n' "$TARGET_NAME" >&2
       result=1
     fi
   fi
