@@ -19,7 +19,7 @@ TARGET_PACKAGE_SET=/etc/portage/sets/portageforge-binhost-packages
 BINHOST_PORT=${PORTAGEFORGE_BINHOST_PORT:-8080}
 BUILDER_CHOST=${PORTAGEFORGE_BUILDER_CHOST:-x86_64-portageforge-linux-gnu}
 BUILDER_COMMON_FLAGS=${PORTAGEFORGE_BUILDER_COMMON_FLAGS:-"-O2 -pipe -march=x86-64"}
-BUILD_WRAPPERS_DIR=/usr/local/lib/portageforge/build-wrappers
+BUILD_WRAPPERS_DIR=/usr/local/bin
 BROOT_PORTAGE_TMPDIR=/var/tmp/portageforge/broot
 CPU_COUNT=$(nproc 2>/dev/null || printf '1')
 HTTP_PID=
@@ -1005,8 +1005,8 @@ create_builder_wrappers() {
   local wrapper_dir
 
   wrapper_dir=$(broot_host_path "$BUILD_WRAPPERS_DIR")
-  rm -rf "$wrapper_dir"
   mkdir -p "$wrapper_dir"
+  find "$wrapper_dir" -maxdepth 1 -type f -name "$BUILDER_CHOST-*" -exec rm -f -- {} +
   for spec in \
     gcc:gcc g++:g++ cc:gcc c++:g++ cpp:cpp \
     ar:ar as:as ld:ld nm:nm ranlib:ranlib strip:strip \
@@ -1163,7 +1163,7 @@ validate_tool_wrappers() {
 broot_run() {
   local command_name=$1
   local env_args=(
-    PATH="$BUILD_WRAPPERS_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     HOME=/root
     ROOT=/
     SYSROOT=/
@@ -1194,9 +1194,11 @@ generate_broot_locales() {
 }
 
 cross_run() {
+  local build_tool_prefix="$BUILD_WRAPPERS_DIR/$BUILDER_CHOST"
   local command_name=$1
+  local target_tool_prefix="$TARGET_WRAPPERS_DIR/$TARGET_CHOST"
   local env_args=(
-    PATH="$TARGET_WRAPPERS_DIR:$BUILD_WRAPPERS_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    PATH="$TARGET_WRAPPERS_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     HOME=/root
     PORTAGE_CONFIGROOT="$TARGET_SYSROOT_PATH"
     ROOT="$TARGET_SYSROOT_PATH"
@@ -1204,36 +1206,38 @@ cross_run() {
     BROOT=/
     CBUILD="$BUILDER_CHOST"
     CHOST="$TARGET_CHOST"
-    BUILD_CC="$BUILDER_CHOST-gcc"
-    BUILD_CXX="$BUILDER_CHOST-g++"
-    BUILD_CPP="$BUILDER_CHOST-cpp"
-    BUILD_AR="$BUILDER_CHOST-ar"
-    BUILD_AS="$BUILDER_CHOST-as"
-    BUILD_LD="$BUILDER_CHOST-ld"
-    BUILD_NM="$BUILDER_CHOST-nm"
-    BUILD_RANLIB="$BUILDER_CHOST-ranlib"
-    BUILD_PKG_CONFIG="$BUILDER_CHOST-pkg-config"
-    CC_FOR_BUILD="$BUILDER_CHOST-gcc"
-    CXX_FOR_BUILD="$BUILDER_CHOST-g++"
-    CPP_FOR_BUILD="$BUILDER_CHOST-cpp"
-    AR_FOR_BUILD="$BUILDER_CHOST-ar"
-    AS_FOR_BUILD="$BUILDER_CHOST-as"
-    LD_FOR_BUILD="$BUILDER_CHOST-ld"
-    NM_FOR_BUILD="$BUILDER_CHOST-nm"
-    RANLIB_FOR_BUILD="$BUILDER_CHOST-ranlib"
-    PKG_CONFIG_FOR_BUILD="$BUILDER_CHOST-pkg-config"
-    HOSTCC="$BUILDER_CHOST-gcc"
-    HOSTCXX="$BUILDER_CHOST-g++"
-    CC="$TARGET_CHOST-gcc"
-    CXX="$TARGET_CHOST-g++"
-    CPP="$TARGET_CHOST-cpp"
-    AR="$TARGET_CHOST-ar"
-    AS="$TARGET_CHOST-as"
-    LD="$TARGET_CHOST-ld"
-    NM="$TARGET_CHOST-nm"
-    RANLIB="$TARGET_CHOST-ranlib"
-    STRIP="$TARGET_CHOST-strip"
-    PKG_CONFIG="$TARGET_CHOST-pkg-config"
+    BUILD_CC="$build_tool_prefix-gcc"
+    BUILD_CXX="$build_tool_prefix-g++"
+    BUILD_CPP="$build_tool_prefix-cpp"
+    BUILD_AR="$build_tool_prefix-ar"
+    BUILD_AS="$build_tool_prefix-as"
+    BUILD_LD="$build_tool_prefix-ld"
+    BUILD_NM="$build_tool_prefix-nm"
+    BUILD_RANLIB="$build_tool_prefix-ranlib"
+    BUILD_PKG_CONFIG="$build_tool_prefix-pkg-config"
+    CC_FOR_BUILD="$build_tool_prefix-gcc"
+    CXX_FOR_BUILD="$build_tool_prefix-g++"
+    CPP_FOR_BUILD="$build_tool_prefix-cpp"
+    AR_FOR_BUILD="$build_tool_prefix-ar"
+    AS_FOR_BUILD="$build_tool_prefix-as"
+    LD_FOR_BUILD="$build_tool_prefix-ld"
+    NM_FOR_BUILD="$build_tool_prefix-nm"
+    RANLIB_FOR_BUILD="$build_tool_prefix-ranlib"
+    PKG_CONFIG_FOR_BUILD="$build_tool_prefix-pkg-config"
+    HOSTCC="$build_tool_prefix-gcc"
+    HOSTCXX="$build_tool_prefix-g++"
+    HOST_CC="$build_tool_prefix-gcc"
+    HOST_CXX="$build_tool_prefix-g++"
+    CC="$target_tool_prefix-gcc"
+    CXX="$target_tool_prefix-g++"
+    CPP="$target_tool_prefix-cpp"
+    AR="$target_tool_prefix-ar"
+    AS="$target_tool_prefix-as"
+    LD="$target_tool_prefix-ld"
+    NM="$target_tool_prefix-nm"
+    RANLIB="$target_tool_prefix-ranlib"
+    STRIP="$target_tool_prefix-strip"
+    PKG_CONFIG="$target_tool_prefix-pkg-config"
     CFLAGS_FOR_BUILD="$BUILDER_COMMON_FLAGS"
     CXXFLAGS_FOR_BUILD="$BUILDER_COMMON_FLAGS"
   )

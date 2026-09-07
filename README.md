@@ -311,7 +311,7 @@ for each /mnt/portageforge-targets/*.tar:
   copy target feature policy into the isolated native BROOT
   write builder-safe compiler settings into the isolated native BROOT
   select the isolated BROOT profile from the synced repository
-  create CBUILD and CHOST wrapper toolchains
+  create CBUILD wrappers in isolated BROOT /usr/local/bin and CHOST wrappers
   mount repo, data, target sysroot, and target tmp paths into the isolated BROOT
   run emerge --sync from inside the isolated BROOT with the target config root
   compile/run BROOT wrapper probes and compile target wrapper probes
