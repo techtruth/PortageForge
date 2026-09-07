@@ -692,7 +692,15 @@ write_make_conf_assignment() {
   local value=$2
 
   [[ -n "$value" ]] || return 0
-  printf '%s=%q\n' "$variable_name" "$value"
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    printf '[portageforge] error: make.conf variable contains a newline and cannot be written safely: %s\n' "$variable_name" >&2
+    return 1
+  fi
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//\$/\\\$}
+  value=${value//\`/\\\`}
+  printf '%s="%s"\n' "$variable_name" "$value"
 }
 
 write_broot_make_conf() {
@@ -767,6 +775,8 @@ apply_broot_portage_config() {
   if [[ -f /etc/resolv.conf ]]; then
     cp -L /etc/resolv.conf "$BROOT_PATH/etc/resolv.conf"
   fi
+
+  copy_broot_locale_state
 }
 
 copy_snapshot_path() {
@@ -782,6 +792,24 @@ copy_snapshot_path() {
     rm -rf "$destination"
     cp -a "$source" "$destination"
   fi
+}
+
+copy_broot_locale_state() {
+  local destination
+  local relative_path
+  local source
+
+  for relative_path in etc/locale.conf etc/locale.gen; do
+    source="$TARGET_ROOT/$relative_path"
+    destination="$BROOT_PATH/$relative_path"
+    if [[ -e "$source" || -L "$source" ]]; then
+      printf '[portageforge] copying target %s to isolated BROOT\n' "$relative_path"
+      mkdir -p "$(dirname "$destination")"
+      rm -rf "$destination"
+      cp -a "$source" "$destination"
+    fi
+  done
+
 }
 
 copy_target_environment_state() {
@@ -1155,6 +1183,16 @@ broot_run() {
   chroot "$BROOT_PATH" /usr/bin/env "${env_args[@]}" "$command_name" "$@"
 }
 
+generate_broot_locales() {
+  if [[ ! -x "$BROOT_PATH/usr/sbin/locale-gen" && ! -x "$BROOT_PATH/usr/bin/locale-gen" ]]; then
+    printf '[portageforge] warning: locale-gen not found in isolated BROOT\n' >&2
+    return 0
+  fi
+
+  printf '[portageforge] generating locales in isolated BROOT\n'
+  broot_run locale-gen
+}
+
 cross_run() {
   local command_name=$1
   local env_args=(
@@ -1382,8 +1420,13 @@ build_target() {
     return 1
   fi
 
+  if ! generate_broot_locales; then
+    printf '[portageforge] error: locale generation failed in isolated BROOT for %s\n' "$TARGET_NAME" >&2
+    result=1
+  fi
+
   printf '[portageforge] syncing repositories for %s\n' "$TARGET_NAME"
-  if ! run_with_sync_retries "target repository sync for $TARGET_NAME" cross_emerge --sync; then
+  if [[ "$result" -eq 0 ]] && ! run_with_sync_retries "target repository sync for $TARGET_NAME" cross_emerge --sync; then
     printf '[portageforge] error: repository sync failed for %s\n' "$TARGET_NAME" >&2
     result=1
   fi
