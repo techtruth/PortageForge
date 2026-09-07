@@ -12,26 +12,27 @@ DATA_SHARE_TAG=portageforge-data
 DATA_ROOT=/mnt/portageforge-data
 TARGET_DATA_ROOT="$DATA_ROOT/targets"
 TARGET_STATE_ROOT=/var/lib/portageforge/targets
+BROOT_STATE_ROOT=/var/lib/portageforge/broots
 STAGE3_TMPDIR=/var/tmp/portageforge/stage3
 PORTAGE_TMPDIR_ROOT=/var/tmp/portageforge/targets
 TARGET_PACKAGE_SET=/etc/portage/sets/portageforge-binhost-packages
 BINHOST_PORT=${PORTAGEFORGE_BINHOST_PORT:-8080}
 BUILDER_CHOST=${PORTAGEFORGE_BUILDER_CHOST:-x86_64-portageforge-linux-gnu}
 BUILDER_COMMON_FLAGS=${PORTAGEFORGE_BUILDER_COMMON_FLAGS:-"-O2 -pipe -march=x86-64"}
-BUILD_WRAPPERS_DIR=/var/lib/portageforge/build-wrappers
-BUILDER_POLICY_OVERLAY_PREFIX=zz-portageforge-target-policy
+BUILD_WRAPPERS_DIR=/usr/local/lib/portageforge/build-wrappers
+BROOT_PORTAGE_TMPDIR=/var/tmp/portageforge/broot
 CPU_COUNT=$(nproc 2>/dev/null || printf '1')
 HTTP_PID=
 TARGET_NAME=
 TARGET_CHOST=
 TARGET_PACKAGE_LIST=
 TARGET_SYSROOT_PATH=
+BROOT_PATH=
 TARGET_WRAPPERS_DIR=
 PKGDIR_PATH=
 DISTDIR_PATH=
 PORTAGE_TMPDIR_PATH=
-TARGET_POLICY_VALUES=()
-TARGET_BROOT_USE_EXPAND_VARIABLES=()
+BROOT_MOUNT_POINTS=()
 if [[ "$CPU_COUNT" -gt 1 ]]; then
   DEFAULT_BUILD_JOBS=$((CPU_COUNT - 1))
 else
@@ -45,7 +46,7 @@ CROSS_RESOLVER_ARGS=(
 )
 
 cleanup() {
-  clear_builder_target_policy_overlays || true
+  unmount_broot_filesystems || true
   if [[ -n "$HTTP_PID" ]]; then
     kill "$HTTP_PID" 2>/dev/null || true
   fi
@@ -161,7 +162,7 @@ prepare_data_share() {
     fi
   fi
 
-  mkdir -p "$TARGET_DATA_ROOT" "$TARGET_STATE_ROOT" "$STAGE3_TMPDIR" "$PORTAGE_TMPDIR_ROOT"
+  mkdir -p "$TARGET_DATA_ROOT" "$TARGET_STATE_ROOT" "$BROOT_STATE_ROOT" "$STAGE3_TMPDIR" "$PORTAGE_TMPDIR_ROOT"
 }
 
 prepare_portage_traversable_dir() {
@@ -217,7 +218,7 @@ prepare_target_workdirs() {
   local target_data_dir
 
   printf '[portageforge] preparing writable Portage work directories\n'
-  mkdir -p "$(dirname "$TARGET_SYSROOT_PATH")"
+  mkdir -p "$(dirname "$TARGET_SYSROOT_PATH")" "$(dirname "$BROOT_PATH")"
   prepare_portage_traversable_dir "$DATA_ROOT"
   prepare_portage_traversable_dir "$TARGET_DATA_ROOT"
   target_data_dir=$(dirname "$PKGDIR_PATH")
@@ -226,6 +227,127 @@ prepare_target_workdirs() {
   prepare_portage_writable_dir "$DISTDIR_PATH"
   rm -rf "$PORTAGE_TMPDIR_PATH"
   prepare_portage_writable_dir "$PORTAGE_TMPDIR_PATH"
+}
+
+broot_known_mount_paths() {
+  [[ -n "$BROOT_PATH" ]] || return 0
+
+  printf '%s\n' \
+    "$BROOT_PATH/proc" \
+    "$BROOT_PATH/sys" \
+    "$BROOT_PATH/dev" \
+    "$BROOT_PATH/run" \
+    "$BROOT_PATH/mnt/portageforge-data" \
+    "$BROOT_PATH/mnt/portageforge-targets" \
+    "$BROOT_PATH/var/db/repos" \
+    "$BROOT_PATH/var/lib/portageforge/targets" \
+    "$BROOT_PATH/var/tmp/portageforge/targets"
+}
+
+unmount_broot_mount_list() {
+  local -a mount_points=("$@")
+  local i
+  local mount_point
+  local result=0
+
+  for ((i = ${#mount_points[@]} - 1; i >= 0; i--)); do
+    mount_point=${mount_points[$i]}
+    if mountpoint -q "$mount_point"; then
+      if ! umount -R "$mount_point"; then
+        printf '[portageforge] error: could not unmount BROOT mount %s\n' "$mount_point" >&2
+        result=1
+      fi
+    fi
+  done
+
+  return "$result"
+}
+
+unmount_broot_filesystems() {
+  local result=0
+
+  if ! unmount_broot_mount_list "${BROOT_MOUNT_POINTS[@]}"; then
+    result=1
+  fi
+  BROOT_MOUNT_POINTS=()
+  return "$result"
+}
+
+unmount_stale_broot_mounts() {
+  local -a mount_points=()
+
+  mapfile -t mount_points < <(broot_known_mount_paths)
+  unmount_broot_mount_list "${mount_points[@]}"
+}
+
+mount_broot_proc() {
+  local destination="$BROOT_PATH/proc"
+
+  mkdir -p "$destination"
+  if mountpoint -q "$destination"; then
+    return 0
+  fi
+  if ! mount -t proc proc "$destination"; then
+    printf '[portageforge] error: could not mount proc in isolated BROOT\n' >&2
+    return 1
+  fi
+  BROOT_MOUNT_POINTS+=("$destination")
+}
+
+mount_broot_bind() {
+  local destination=$2
+  local mode=$3
+  local source=$1
+
+  mkdir -p "$destination"
+  if mountpoint -q "$destination"; then
+    return 0
+  fi
+  case "$mode" in
+    bind)
+      if ! mount --bind "$source" "$destination"; then
+        printf '[portageforge] error: could not bind mount %s at %s\n' "$source" "$destination" >&2
+        return 1
+      fi
+      ;;
+    rbind)
+      if ! mount --rbind "$source" "$destination"; then
+        printf '[portageforge] error: could not recursive-bind mount %s at %s\n' "$source" "$destination" >&2
+        return 1
+      fi
+      mount --make-rslave "$destination" || true
+      ;;
+    *)
+      printf '[portageforge] error: unsupported BROOT mount mode: %s\n' "$mode" >&2
+      return 1
+      ;;
+  esac
+  BROOT_MOUNT_POINTS+=("$destination")
+}
+
+mount_broot_filesystems() {
+  BROOT_MOUNT_POINTS=()
+  printf '[portageforge] mounting isolated BROOT runtime filesystems\n'
+
+  mkdir -p \
+    "$BROOT_PATH/dev" \
+    "$BROOT_PATH/mnt/portageforge-data" \
+    "$BROOT_PATH/mnt/portageforge-targets" \
+    "$BROOT_PATH/run" \
+    "$BROOT_PATH/sys" \
+    "$BROOT_PATH/var/db/repos" \
+    "$BROOT_PATH/var/lib/portageforge/targets" \
+    "$BROOT_PATH/var/tmp/portageforge/targets"
+
+  mount_broot_proc || return 1
+  mount_broot_bind /sys "$BROOT_PATH/sys" rbind || return 1
+  mount_broot_bind /dev "$BROOT_PATH/dev" rbind || return 1
+  mount_broot_bind /run "$BROOT_PATH/run" bind || return 1
+  mount_broot_bind "$DATA_ROOT" "$BROOT_PATH$DATA_ROOT" bind || return 1
+  mount_broot_bind "$TARGETS_MOUNT" "$BROOT_PATH$TARGETS_MOUNT" bind || return 1
+  mount_broot_bind /var/db/repos "$BROOT_PATH/var/db/repos" bind || return 1
+  mount_broot_bind "$TARGET_STATE_ROOT" "$BROOT_PATH$TARGET_STATE_ROOT" bind || return 1
+  mount_broot_bind "$PORTAGE_TMPDIR_ROOT" "$BROOT_PATH$PORTAGE_TMPDIR_ROOT" bind || return 1
 }
 
 builder_run() {
@@ -280,7 +402,6 @@ update_builder_native_system() {
 }
 
 prepare_builder_native_system() {
-  clear_builder_target_policy_overlays
   printf '[portageforge] syncing builder repository\n'
   run_with_sync_retries "builder repository sync" builder_emerge --sync
   validate_builder_runtime
@@ -413,24 +534,46 @@ download_stage3() {
   printf '%s\n' "$archive_path"
 }
 
-prepare_target_sysroot() {
+extract_stage3_root() {
+  local archive_path=$1
+  local destination=$2
+
+  mkdir -p "$destination"
+  tar -xpf "$archive_path" -C "$destination" --xattrs --numeric-owner
+}
+
+prepare_target_roots() {
   local archive_path
   local profile=$1
   local stage3_download_dir
   local variant
-  local variant_file="$TARGET_SYSROOT_PATH/.portageforge-stage3-variant"
 
   variant=$(stage3_variant_for_profile "$profile")
   archive_path=$(download_stage3 "$variant")
   stage3_download_dir=$(dirname "$archive_path")
+
   printf '[portageforge] recreating fresh %s target sysroot for %s\n' "$variant" "$TARGET_NAME"
   rm -rf "$TARGET_SYSROOT_PATH"
   mkdir -p "$TARGET_SYSROOT_PATH"
-  if ! tar -xpf "$archive_path" -C "$TARGET_SYSROOT_PATH" --xattrs --numeric-owner; then
+  if ! extract_stage3_root "$archive_path" "$TARGET_SYSROOT_PATH"; then
     rm -rf "$stage3_download_dir"
     return 1
   fi
-  printf '%s\n' "$variant" >"$variant_file"
+  printf '%s\n' "$variant" >"$TARGET_SYSROOT_PATH/.portageforge-stage3-variant"
+
+  printf '[portageforge] recreating fresh %s isolated native BROOT for %s\n' "$variant" "$TARGET_NAME"
+  if ! unmount_stale_broot_mounts; then
+    rm -rf "$stage3_download_dir"
+    return 1
+  fi
+  rm -rf "$BROOT_PATH"
+  mkdir -p "$BROOT_PATH"
+  if ! extract_stage3_root "$archive_path" "$BROOT_PATH"; then
+    rm -rf "$stage3_download_dir"
+    return 1
+  fi
+  printf '%s\n' "$variant" >"$BROOT_PATH/.portageforge-stage3-variant"
+
   rm -rf "$stage3_download_dir"
 }
 
@@ -517,6 +660,113 @@ set_target_profile_link() {
   printf '[portageforge] selecting target profile: %s\n' "$profile"
   rm -rf "$TARGET_SYSROOT_PATH/etc/portage/make.profile"
   ln -s "$profile_path" "$TARGET_SYSROOT_PATH/etc/portage/make.profile"
+}
+
+set_broot_profile_link() {
+  local profile=$1
+  local profile_path="/var/db/repos/gentoo/profiles/$profile"
+
+  if [[ ! -d "$profile_path" ]]; then
+    printf '[portageforge] error: BROOT profile not found after repository sync: %s\n' "$profile_path" >&2
+    return 1
+  fi
+
+  printf '[portageforge] selecting isolated BROOT profile: %s\n' "$profile"
+  rm -rf "$BROOT_PATH/etc/portage/make.profile"
+  ln -s "$profile_path" "$BROOT_PATH/etc/portage/make.profile"
+}
+
+target_config_portage_envvar() {
+  local variable_name=$1
+
+  env \
+    PORTAGE_CONFIGROOT="$TARGET_SYSROOT_PATH" \
+    ROOT="$TARGET_SYSROOT_PATH" \
+    SYSROOT="$TARGET_SYSROOT_PATH" \
+    BROOT=/ \
+    portageq envvar "$variable_name"
+}
+
+write_make_conf_assignment() {
+  local variable_name=$1
+  local value=$2
+
+  [[ -n "$value" ]] || return 0
+  printf '%s=%q\n' "$variable_name" "$value"
+}
+
+write_broot_make_conf() {
+  local loaded=()
+  local policy_variable
+  local use_expand
+  local value
+  local variable_name
+
+  {
+    printf '# Generated by PortageForge for isolated native BROOT dependencies.\n'
+    write_make_conf_assignment CBUILD "$BUILDER_CHOST"
+    write_make_conf_assignment CHOST "$BUILDER_CHOST"
+    write_make_conf_assignment ACCEPT_CHOSTS "$BUILDER_CHOST $TARGET_CHOST"
+    write_make_conf_assignment COMMON_FLAGS "$BUILDER_COMMON_FLAGS"
+    printf 'CFLAGS="${COMMON_FLAGS}"\n'
+    printf 'CXXFLAGS="${COMMON_FLAGS}"\n'
+    printf 'FCFLAGS="${COMMON_FLAGS}"\n'
+    printf 'FFLAGS="${COMMON_FLAGS}"\n'
+    printf 'FEATURES="${FEATURES} -buildpkg -test"\n'
+    write_make_conf_assignment DISTDIR "$DISTDIR_PATH"
+    write_make_conf_assignment PORTAGE_TMPDIR "$BROOT_PORTAGE_TMPDIR"
+    write_make_conf_assignment MAKEOPTS "-j$BUILD_JOBS"
+
+    for policy_variable in ACCEPT_KEYWORDS ACCEPT_LICENSE ACCEPT_PROPERTIES ACCEPT_RESTRICT GENTOO_MIRRORS USE; do
+      if ! value=$(read_target_make_conf_value "$policy_variable"); then
+        return 1
+      fi
+      if [[ -n "$value" ]]; then
+        write_make_conf_assignment "$policy_variable" "$value"
+        loaded+=("$policy_variable")
+      fi
+    done
+
+    if ! use_expand=$(target_config_portage_envvar USE_EXPAND); then
+      printf '[portageforge] error: could not read target USE_EXPAND\n' >&2
+      return 1
+    fi
+    for variable_name in $use_expand; do
+      is_broot_use_expand_variable_name "$variable_name" || continue
+      if ! value=$(read_target_make_conf_value "$variable_name"); then
+        return 1
+      fi
+      [[ -n "$value" ]] || continue
+      write_make_conf_assignment "$variable_name" "$value"
+      loaded+=("$variable_name")
+    done
+  } >"$BROOT_PATH/etc/portage/make.conf"
+
+  if [[ "${#loaded[@]}" -gt 0 ]]; then
+    printf '[portageforge] copied target feature policy into isolated BROOT make.conf: %s\n' "${loaded[*]}"
+  fi
+}
+
+apply_broot_portage_config() {
+  printf '[portageforge] applying target feature policy to isolated native BROOT\n'
+  rm -rf "$BROOT_PATH/etc/portage"
+  mkdir -p "$BROOT_PATH/etc"
+  cp -a "$TARGET_ROOT/etc/portage" "$BROOT_PATH/etc/portage"
+  rm -rf \
+    "$BROOT_PATH/etc/portage/env" \
+    "$BROOT_PATH/etc/portage/make.profile" \
+    "$BROOT_PATH/etc/portage/package.env"
+  rm -f "$BROOT_PATH$TARGET_PACKAGE_SET"
+  if ! write_broot_make_conf; then
+    return 1
+  fi
+
+  mkdir -p "$BROOT_PATH$BROOT_PORTAGE_TMPDIR"
+  prepare_portage_writable_dir "$BROOT_PATH$BROOT_PORTAGE_TMPDIR"
+
+  if [[ -f /etc/resolv.conf ]]; then
+    cp -L /etc/resolv.conf "$BROOT_PATH/etc/resolv.conf"
+  fi
 }
 
 copy_snapshot_path() {
@@ -627,10 +877,23 @@ apply_target_portage_config() {
   printf '[portageforge] target Portage snapshot applied\n'
 }
 
-command_path() {
-  local command_name=$1
+broot_host_path() {
+  local path=$1
 
-  command -v "$command_name" 2>/dev/null || true
+  printf '%s%s\n' "$BROOT_PATH" "$path"
+}
+
+broot_command_path() {
+  local command_name=$1
+  local prefix
+
+  for prefix in /usr/local/bin /usr/bin /bin /usr/local/sbin /usr/sbin /sbin; do
+    if [[ -x "$BROOT_PATH$prefix/$command_name" ]]; then
+      printf '%s/%s\n' "$prefix" "$command_name"
+      return 0
+    fi
+  done
+  return 1
 }
 
 write_compiler_wrapper() {
@@ -711,25 +974,27 @@ create_builder_wrappers() {
   local native
   local spec
   local tool
+  local wrapper_dir
 
-  rm -rf "$BUILD_WRAPPERS_DIR"
-  mkdir -p "$BUILD_WRAPPERS_DIR"
+  wrapper_dir=$(broot_host_path "$BUILD_WRAPPERS_DIR")
+  rm -rf "$wrapper_dir"
+  mkdir -p "$wrapper_dir"
   for spec in \
     gcc:gcc g++:g++ cc:gcc c++:g++ cpp:cpp \
     ar:ar as:as ld:ld nm:nm ranlib:ranlib strip:strip \
     objcopy:objcopy objdump:objdump readelf:readelf pkg-config:pkg-config; do
     tool=${spec%%:*}
-    native=$(command_path "${spec#*:}")
+    native=$(broot_command_path "${spec#*:}" || true)
     if [[ "$tool" == pkg-config && -z "$native" ]]; then
-      native=pkg-config
+      native=/usr/bin/pkg-config
     fi
     [[ -n "$native" ]] || continue
     case "$tool" in
       gcc|g++|cc|c++|cpp)
-        write_compiler_wrapper "$native" "$BUILD_WRAPPERS_DIR/$BUILDER_CHOST-$tool" "$BUILDER_COMMON_FLAGS"
+        write_compiler_wrapper "$native" "$wrapper_dir/$BUILDER_CHOST-$tool" "$BUILDER_COMMON_FLAGS"
         ;;
       *)
-        write_passthrough_wrapper "$native" "$BUILD_WRAPPERS_DIR/$BUILDER_CHOST-$tool"
+        write_passthrough_wrapper "$native" "$wrapper_dir/$BUILDER_CHOST-$tool"
         ;;
     esac
   done
@@ -746,7 +1011,7 @@ create_target_wrappers() {
 
   for spec in gcc:gcc g++:g++ cc:gcc c++:g++ cpp:cpp; do
     tool=${spec%%:*}
-    native=$(command_path "${spec#*:}")
+    native=$(broot_command_path "${spec#*:}" || true)
     if [[ -z "$native" ]]; then
       printf '[portageforge] error: required compiler command not found: %s\n' "${spec#*:}" >&2
       exit 1
@@ -756,13 +1021,13 @@ create_target_wrappers() {
 
   for spec in ar:ar as:as ld:ld ld.bfd:ld.bfd ld.gold:ld.gold ld.lld:ld.lld nm:nm ranlib:ranlib strip:strip objcopy:objcopy objdump:objdump readelf:readelf; do
     tool=${spec%%:*}
-    native=$(command_path "${spec#*:}")
+    native=$(broot_command_path "${spec#*:}" || true)
     [[ -n "$native" ]] || continue
     write_target_binutils_wrapper "$native" "$TARGET_WRAPPERS_DIR/$TARGET_CHOST-$tool" "$tool"
   done
 
-  native=$(command_path pkg-config)
-  native=${native:-pkg-config}
+  native=$(broot_command_path pkg-config || true)
+  native=${native:-/usr/bin/pkg-config}
   write_target_pkg_config_wrapper "$native" "$TARGET_WRAPPERS_DIR/$TARGET_CHOST-pkg-config"
 }
 
@@ -775,20 +1040,6 @@ target_portage_envvar() {
   fi
 }
 
-read_target_portage_value() {
-  local value
-  local variable_name=$1
-
-  if ! value=$(target_portage_envvar "$variable_name"); then
-    return 1
-  fi
-  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
-    printf '[portageforge] error: target Portage variable contains a newline and cannot be projected safely: %s\n' "$variable_name" >&2
-    return 1
-  fi
-  printf '%s\n' "$value"
-}
-
 read_target_make_conf_value() {
   local value
   local variable_name=$1
@@ -798,18 +1049,6 @@ read_target_make_conf_value() {
     return 1
   fi
   printf '%s\n' "$value"
-}
-
-target_policy_value() {
-  local entry
-  local variable_name=$1
-
-  for entry in "${TARGET_POLICY_VALUES[@]}"; do
-    if [[ "$entry" == "$variable_name="* ]]; then
-      printf '%s\n' "${entry#*=}"
-      return
-    fi
-  done
 }
 
 is_broot_use_expand_variable_name() {
@@ -828,157 +1067,8 @@ is_broot_use_expand_variable_name() {
   esac
 }
 
-load_target_policy_values() {
-  local loaded=()
-  local policy_values=()
-  local use_expand
-  local value
-  local variable_name
-
-  TARGET_POLICY_VALUES=()
-  TARGET_BROOT_USE_EXPAND_VARIABLES=()
-
-  if ! value=$(read_target_portage_value ACCEPT_KEYWORDS); then
-    return 1
-  fi
-  if [[ -n "$value" ]]; then
-    policy_values+=("ACCEPT_KEYWORDS=$value")
-    loaded+=(ACCEPT_KEYWORDS)
-  fi
-
-  if ! use_expand=$(read_target_portage_value USE_EXPAND); then
-    return 1
-  fi
-  for variable_name in $use_expand; do
-    is_broot_use_expand_variable_name "$variable_name" || continue
-    if ! value=$(read_target_make_conf_value "$variable_name"); then
-      return 1
-    fi
-    if [[ -z "$value" || "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
-      continue
-    fi
-    policy_values+=("$variable_name=$value")
-    TARGET_BROOT_USE_EXPAND_VARIABLES+=("$variable_name")
-    loaded+=("$variable_name")
-  done
-
-  TARGET_POLICY_VALUES=("${policy_values[@]}")
-  if [[ "${#loaded[@]}" -gt 0 ]]; then
-    printf '[portageforge] loaded target policy bridge values for native build dependencies: %s\n' "${loaded[*]}"
-  fi
-  if [[ "${#TARGET_BROOT_USE_EXPAND_VARIABLES[@]}" -gt 0 ]]; then
-    printf '[portageforge] bridged target USE_EXPAND variables: %s\n' "${TARGET_BROOT_USE_EXPAND_VARIABLES[*]}"
-  fi
-}
-
-clear_builder_target_policy_overlays() {
-  local config_name
-  local path
-
-  for config_name in package.accept_keywords package.use; do
-    path="/etc/portage/$config_name"
-    if [[ -d "$path" ]]; then
-      rm -f "$path/$BUILDER_POLICY_OVERLAY_PREFIX"-*
-    fi
-  done
-}
-
-builder_overlay_file() {
-  local config_name=$1
-  local path="/etc/portage/$config_name"
-
-  if [[ -e "$path" && ! -d "$path" ]]; then
-    printf '[portageforge] error: builder %s must be a directory for PortageForge target policy overlays\n' "$path" >&2
-    return 1
-  fi
-  mkdir -p "$path"
-  printf '%s/%s-%s\n' "$path" "$BUILDER_POLICY_OVERLAY_PREFIX" "$TARGET_NAME"
-}
-
-append_target_portage_config_path() {
-  local destination=$1
-  local relative_path=$2
-  local source="$TARGET_SYSROOT_PATH/etc/portage/$relative_path"
-  local source_file
-
-  if [[ -f "$source" ]]; then
-    printf '\n# from target %s\n' "etc/portage/$relative_path" >>"$destination"
-    cat "$source" >>"$destination"
-    return
-  fi
-  if [[ ! -d "$source" ]]; then
-    return
-  fi
-
-  while IFS= read -r source_file; do
-    printf '\n# from target %s\n' "${source_file#"$TARGET_SYSROOT_PATH/"}" >>"$destination"
-    cat "$source_file" >>"$destination"
-  done < <(find "$source" -type f | sort)
-}
-
-positive_policy_tokens() {
-  local -a tokens=()
-  local token
-
-  read -r -a tokens <<<"$1"
-  for token in "${tokens[@]}"; do
-    if [[ "$token" != -* ]]; then
-      printf '%s\n' "$token"
-    fi
-  done
-}
-
-write_builder_accept_keywords_overlay() {
-  local accept_keywords
-  local destination
-
-  destination=$(builder_overlay_file package.accept_keywords)
-  : >"$destination"
-
-  accept_keywords=$(target_policy_value ACCEPT_KEYWORDS)
-  if [[ -n "$accept_keywords" ]]; then
-    printf '# global target ACCEPT_KEYWORDS projected for BROOT dependencies\n' >>"$destination"
-    printf '*/* %s\n' "$accept_keywords" >>"$destination"
-  fi
-  append_target_portage_config_path "$destination" package.accept_keywords
-  append_target_portage_config_path "$destination" package.keywords
-
-  if [[ ! -s "$destination" ]]; then
-    rm -f "$destination"
-  fi
-}
-
-write_builder_package_use_overlay() {
-  local -a positive_values=()
-  local destination
-  local value
-  local variable_name
-
-  destination=$(builder_overlay_file package.use)
-  : >"$destination"
-
-  for variable_name in "${TARGET_BROOT_USE_EXPAND_VARIABLES[@]}"; do
-    value=$(target_policy_value "$variable_name")
-    mapfile -t positive_values < <(positive_policy_tokens "$value")
-    if [[ "${#positive_values[@]}" -gt 0 ]]; then
-      printf '*/* %s: -* %s\n' "$variable_name" "${positive_values[*]}" >>"$destination"
-    fi
-  done
-  append_target_portage_config_path "$destination" package.use
-
-  if [[ ! -s "$destination" ]]; then
-    rm -f "$destination"
-  fi
-}
-
-apply_builder_target_policy_overlay() {
-  clear_builder_target_policy_overlays
-  write_builder_accept_keywords_overlay
-  write_builder_package_use_overlay
-  printf '[portageforge] applied target keyword, package.use, and selected USE_EXPAND overlays for native BROOT dependencies\n'
-}
-
 validate_tool_wrappers() {
+  local build_wrappers_host_dir
   local probe_dir="$PORTAGE_TMPDIR_PATH/wrapper-probe"
   local target_cflags
   local target_cxxflags
@@ -988,9 +1078,10 @@ validate_tool_wrappers() {
   rm -rf "$probe_dir"
   mkdir -p "$probe_dir"
 
+  build_wrappers_host_dir=$(broot_host_path "$BUILD_WRAPPERS_DIR")
   for wrapper_path in \
-    "$BUILD_WRAPPERS_DIR/$BUILDER_CHOST-gcc" \
-    "$BUILD_WRAPPERS_DIR/$BUILDER_CHOST-g++" \
+    "$build_wrappers_host_dir/$BUILDER_CHOST-gcc" \
+    "$build_wrappers_host_dir/$BUILDER_CHOST-g++" \
     "$TARGET_WRAPPERS_DIR/$TARGET_CHOST-gcc" \
     "$TARGET_WRAPPERS_DIR/$TARGET_CHOST-g++" \
     "$TARGET_WRAPPERS_DIR/$TARGET_CHOST-pkg-config"; do
@@ -1001,21 +1092,21 @@ validate_tool_wrappers() {
   done
 
   printf 'int main(void) { return 0; }\n' >"$probe_dir/build.c"
-  if ! PATH="$BUILD_WRAPPERS_DIR:$PATH" "$BUILDER_CHOST-gcc" "$probe_dir/build.c" -o "$probe_dir/build-c"; then
+  if ! broot_run "$BUILDER_CHOST-gcc" "$probe_dir/build.c" -o "$probe_dir/build-c"; then
     printf '[portageforge] error: builder C compiler wrapper failed\n' >&2
     return 1
   fi
-  if ! "$probe_dir/build-c"; then
+  if ! broot_run "$probe_dir/build-c"; then
     printf '[portageforge] error: builder C compiler produced a non-runnable helper binary\n' >&2
     return 1
   fi
 
   printf 'int main() { return 0; }\n' >"$probe_dir/build.cc"
-  if ! PATH="$BUILD_WRAPPERS_DIR:$PATH" "$BUILDER_CHOST-g++" "$probe_dir/build.cc" -o "$probe_dir/build-cxx"; then
+  if ! broot_run "$BUILDER_CHOST-g++" "$probe_dir/build.cc" -o "$probe_dir/build-cxx"; then
     printf '[portageforge] error: builder C++ compiler wrapper failed\n' >&2
     return 1
   fi
-  if ! "$probe_dir/build-cxx"; then
+  if ! broot_run "$probe_dir/build-cxx"; then
     printf '[portageforge] error: builder C++ compiler produced a non-runnable helper binary\n' >&2
     return 1
   fi
@@ -1025,7 +1116,7 @@ validate_tool_wrappers() {
   fi
   printf '#include <stdio.h>\nint portageforge_c_probe(void) { return EOF == EOF ? 0 : 1; }\n' >"$probe_dir/target.c"
   # shellcheck disable=SC2086
-  if ! PATH="$TARGET_WRAPPERS_DIR:$BUILD_WRAPPERS_DIR:$PATH" "$TARGET_CHOST-gcc" $target_cflags -c "$probe_dir/target.c" -o "$probe_dir/target.o"; then
+  if ! cross_run "$TARGET_CHOST-gcc" $target_cflags -c "$probe_dir/target.c" -o "$probe_dir/target.o"; then
     printf '[portageforge] error: target C compiler wrapper failed with target CFLAGS: %s\n' "$target_cflags" >&2
     return 1
   fi
@@ -1035,16 +1126,40 @@ validate_tool_wrappers() {
   fi
   printf '#include <cstdio>\nint portageforge_cxx_probe() { return EOF == EOF ? 0 : 1; }\n' >"$probe_dir/target.cc"
   # shellcheck disable=SC2086
-  if ! PATH="$TARGET_WRAPPERS_DIR:$BUILD_WRAPPERS_DIR:$PATH" "$TARGET_CHOST-g++" $target_cxxflags -c "$probe_dir/target.cc" -o "$probe_dir/target-cxx.o"; then
+  if ! cross_run "$TARGET_CHOST-g++" $target_cxxflags -c "$probe_dir/target.cc" -o "$probe_dir/target-cxx.o"; then
     printf '[portageforge] error: target C++ compiler wrapper failed with target CXXFLAGS: %s\n' "$target_cxxflags" >&2
     return 1
   fi
 }
 
+broot_run() {
+  local command_name=$1
+  local env_args=(
+    PATH="$BUILD_WRAPPERS_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    HOME=/root
+    ROOT=/
+    SYSROOT=/
+    BROOT=/
+    PORTAGE_CONFIGROOT=/
+    CBUILD="$BUILDER_CHOST"
+    CHOST="$BUILDER_CHOST"
+    COMMON_FLAGS="$BUILDER_COMMON_FLAGS"
+    CFLAGS="$BUILDER_COMMON_FLAGS"
+    CXXFLAGS="$BUILDER_COMMON_FLAGS"
+    FCFLAGS="$BUILDER_COMMON_FLAGS"
+    FFLAGS="$BUILDER_COMMON_FLAGS"
+    MAKEOPTS="-j$BUILD_JOBS"
+  )
+  shift
+
+  chroot "$BROOT_PATH" /usr/bin/env "${env_args[@]}" "$command_name" "$@"
+}
+
 cross_run() {
   local command_name=$1
   local env_args=(
-    PATH="$TARGET_WRAPPERS_DIR:$BUILD_WRAPPERS_DIR:$PATH"
+    PATH="$TARGET_WRAPPERS_DIR:$BUILD_WRAPPERS_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    HOME=/root
     PORTAGE_CONFIGROOT="$TARGET_SYSROOT_PATH"
     ROOT="$TARGET_SYSROOT_PATH"
     SYSROOT="$TARGET_SYSROOT_PATH"
@@ -1086,7 +1201,7 @@ cross_run() {
   )
   shift
 
-  env "${env_args[@]}" "$command_name" "$@"
+  chroot "$BROOT_PATH" /usr/bin/env "${env_args[@]}" "$command_name" "$@"
 }
 
 cross_emerge() {
@@ -1150,7 +1265,6 @@ prepare_builder_from_snapshot() {
   local hostname=
   local profile
 
-  clear_builder_target_policy_overlays
   rm -rf "$TARGET_ROOT"
   mkdir -p "$TARGET_ROOT"
 
@@ -1192,6 +1306,7 @@ prepare_builder_from_snapshot() {
   TARGET_NAME=$(sanitize_target_name "$hostname")
   TARGET_PACKAGE_LIST="$TARGETS_MOUNT/${archive_name}.packages"
   TARGET_SYSROOT_PATH="$TARGET_STATE_ROOT/$TARGET_NAME/sysroot"
+  BROOT_PATH="$BROOT_STATE_ROOT/$TARGET_NAME/root"
   PORTAGE_TMPDIR_PATH="$PORTAGE_TMPDIR_ROOT/$TARGET_NAME"
   PKGDIR_PATH="$TARGET_DATA_ROOT/$TARGET_NAME/binpkgs"
   DISTDIR_PATH="$TARGET_DATA_ROOT/$TARGET_NAME/distfiles"
@@ -1215,12 +1330,16 @@ prepare_builder_from_snapshot() {
     exit 1
   fi
 
-  prepare_target_sysroot "$profile" || return 1
+  prepare_target_roots "$profile" || return 1
   apply_target_portage_config || return 1
+  set_target_profile_link "$profile" || return 1
+  apply_broot_portage_config || return 1
+  set_broot_profile_link "$profile" || return 1
   create_builder_wrappers || return 1
   create_target_wrappers || return 1
 
   printf '[portageforge] builder CBUILD: %s\n' "$BUILDER_CHOST"
+  printf '[portageforge] isolated BROOT: %s\n' "$BROOT_PATH"
   printf '[portageforge] target CHOST: %s\n' "$TARGET_CHOST"
   printf '[portageforge] target sysroot: %s\n' "$TARGET_SYSROOT_PATH"
   printf '[portageforge] target Portage tmpdir: %s\n' "$PORTAGE_TMPDIR_PATH"
@@ -1257,6 +1376,11 @@ build_target() {
   local result=0
 
   prepare_builder_from_snapshot "$archive" || return 1
+  if ! mount_broot_filesystems; then
+    printf '[portageforge] error: could not mount isolated BROOT for %s\n' "$TARGET_NAME" >&2
+    unmount_broot_filesystems || true
+    return 1
+  fi
 
   printf '[portageforge] syncing repositories for %s\n' "$TARGET_NAME"
   if ! run_with_sync_retries "target repository sync for $TARGET_NAME" cross_emerge --sync; then
@@ -1268,11 +1392,8 @@ build_target() {
     result=1
   fi
 
-  if [[ "$result" -eq 0 ]]; then
-    if ! load_target_policy_values || ! apply_builder_target_policy_overlay; then
-      printf '[portageforge] error: target policy bridge failed for %s\n' "$TARGET_NAME" >&2
-      result=1
-    fi
+  if [[ "$result" -eq 0 ]] && ! set_broot_profile_link "$(metadata_value profile)"; then
+    result=1
   fi
 
   if [[ "$result" -eq 0 ]]; then
@@ -1293,6 +1414,10 @@ build_target() {
       printf '[portageforge] error: binhost index refresh failed for %s\n' "$TARGET_NAME" >&2
       result=1
     fi
+  fi
+
+  if ! unmount_broot_filesystems; then
+    result=1
   fi
 
   return "$result"

@@ -85,6 +85,39 @@ After repository sync, the builder runs wrapper probes before starting package
 builds. Builder-side probes are compiled and executed. Target-side probes are
 compiled only, using the target `CFLAGS` and `CXXFLAGS`.
 
+## Root Role Policy
+
+PortageForge should use the same root roles for microarchitecture-only and
+cross-architecture targets:
+
+```text
+/                         builder runtime and control plane
+<broot>/<target>           builder-runnable native build tools
+<sysroot>/<target>         target packages, headers, and libraries
+```
+
+The builder runtime owns QEMU startup, mounts, syncs, logging, and binhost
+serving. It keeps its own profile and compiler policy and should not receive
+target feature overlays.
+
+The target sysroot owns target output policy. It receives the target profile,
+target repositories, target selected package roots, target `USE`,
+`package.use`, masks, licenses, `ACCEPT_KEYWORDS`, `CHOST`, `CTARGET`,
+compiler flags, CPU flags, ABI flags, and package environment files.
+
+The native `BROOT` owns build-time tools that must execute on the builder CPU.
+It may receive target feature policy such as global `USE`, `package.use`,
+masks, licenses, language targets, `VIDEO_CARDS`, and `LLVM_TARGETS`, but it
+must keep builder-runnable output policy. It must not receive target `CHOST`,
+`CTARGET`, `CFLAGS`, `CXXFLAGS`, `FCFLAGS`, `FFLAGS`, `LDFLAGS`, CPU flags,
+ABI flags, or package environment files that make its binaries target-only.
+
+Keyword policy has to be role-aware. The target sysroot uses the target's
+literal keywords, such as `~arm64`. A cross-architecture `BROOT` uses the
+builder-architecture equivalent, such as `~amd64`, while preserving the same
+stable or testing intent. In same-architecture microarchitecture builds, those
+keywords are usually identical.
+
 ## Target Snapshot
 
 Generate the snapshot on each target Gentoo machine:
@@ -270,55 +303,59 @@ for each /mnt/portageforge-targets/*.tar:
   validate and load the target snapshot and package list
   confirm the target CHOST matches the builder GCC target
   recreate /var/lib/portageforge/targets/<target>/sysroot from stage3
+  recreate /var/lib/portageforge/broots/<target>/root from stage3
   prepare binpkg, distfiles, and Portage temp directories for the portage user
   copy the target /etc/portage policy into that sysroot
   append PortageForge cross-build settings
-  create CBUILD and CHOST wrapper toolchains
-  run emerge --sync with the target config root
   select the target profile from the synced repository
-  create the BROOT policy bridge for native build dependencies
-  compile/run builder wrapper probes and compile target wrapper probes
+  copy target feature policy into the isolated native BROOT
+  write builder-safe compiler settings into the isolated native BROOT
+  select the isolated BROOT profile from the synced repository
+  create CBUILD and CHOST wrapper toolchains
+  mount repo, data, target sysroot, and target tmp paths into the isolated BROOT
+  run emerge --sync from inside the isolated BROOT with the target config root
+  compile/run BROOT wrapper probes and compile target wrapper probes
   emptytree-install target build dependencies for @system and the target package roots
   emerge @system and the target package roots with --emptytree --buildpkg
   run emaint binhost --fix for the target PKGDIR
+  unmount the isolated BROOT runtime filesystems
 sleep 24 hours
 ```
 
 PortageForge emits modern `.gpkg.tar` binary packages. The legacy `xpak` format
 is not supported.
 
-The target sysroot is disposable builder state. It is recreated from stage3 for
-each target build so stale packages from earlier resolver attempts cannot stay
-installed and poison slot transitions. The binpkg cache, distfiles, and builder
-root persist; the target sysroot does not.
+The target sysroot and isolated native BROOT are disposable builder state. They
+are recreated from stage3 for each target build so stale packages from earlier
+resolver attempts cannot stay installed and poison slot transitions. The binpkg
+cache, distfiles, and VM runtime root persist; the target sysroot and isolated
+BROOT do not.
 
-PortageForge keeps the builder root as a normal builder runtime under `/`.
-During target builds, it keeps the target `/etc/portage` policy on the target
-sysroot and uses a temporary builder bridge for native `BDEPEND` tools. Target
-compiler flags, CPU flags, `CHOST`, `CFLAGS`, `CXXFLAGS`, and package
-environment files stay on the target side.
+The isolated native BROOT receives a copy of the target's Portage feature
+policy, including global `USE`, `package.use`, `package.accept_keywords`,
+masks, unmask files, licenses, and non-CPU `USE_EXPAND` values such as
+`VIDEO_CARDS`, `LLVM_TARGETS`, `PYTHON_TARGETS`, and `LUA_SINGLE_TARGET`.
+PortageForge replaces the BROOT `make.conf` with generated builder-safe output
+policy: `CBUILD` and `CHOST` are the fake builder tuple, `ACCEPT_CHOSTS`
+permits both the fake builder tuple and the target tuple during stage3
+bootstrap, and `COMMON_FLAGS`, `CFLAGS`, `CXXFLAGS`, `FCFLAGS`, and `FFLAGS`
+use `PORTAGEFORGE_BUILDER_COMMON_FLAGS`. Target `package.env` and target
+`/etc/portage/env` are not copied into BROOT.
 
-For `BROOT=/` dependencies, PortageForge writes temporary builder-root policy
-overlays named `zz-portageforge-target-policy-*` under
-`/etc/portage/package.accept_keywords` and `/etc/portage/package.use`. These
-project target keyword acceptance such as `~amd64`, target package-specific
-keyword and USE files, and explicit non-CPU target make.conf `USE_EXPAND`
-policy such as `VIDEO_CARDS`, `LLVM_TARGETS`, `PYTHON_TARGETS`, and
-`PYTHON_SINGLE_TARGET`. Target global `USE` is not projected into BROOT,
-because it can conflict with flags forced by the builder runtime profile. This
-lets native build tools such as `wayland-scanner`, Mesa helpers, GTK helpers,
-and Python build backends satisfy the target graph without inheriting unrelated
-target compiler or CPU policy. The overlays are cleared before builder runtime
-updates and recreated for each target.
+Target compiler flags, CPU flags, target `CHOST`, target `CTARGET`, and target
+package environment files stay on the target sysroot side. Cross emerges run
+inside the isolated BROOT chroot with `BROOT=/`,
+`ROOT=<target sysroot>`, `SYSROOT=<target sysroot>`, and
+`PORTAGE_CONFIGROOT=<target sysroot>`.
 
 Target build dependencies are installed with `--emptytree --onlydeps` so
 stage3's preinstalled package database does not decide target-policy USE or
 Python slot transitions. Target package outputs are merged under
 `ROOT=<target sysroot>` with `SYSROOT=<target sysroot>` and the target
-snapshot's `/etc/portage` policy. Native `BDEPEND` tools resolve against
-`BROOT=/`; target `DEPEND` and `RDEPEND` resolve against the target sysroot.
-Cross emerges use `--autounmask=n`; missing USE, keyword, or USE_EXPAND target
-policy must be fixed on the target and exported again.
+snapshot's `/etc/portage` policy. Native `BDEPEND` tools resolve against the
+isolated BROOT; target `DEPEND` and `RDEPEND` resolve against the target
+sysroot. Cross emerges use `--autounmask=n`; missing USE, keyword, or
+USE_EXPAND target policy must be fixed on the target and exported again.
 
 `PKGDIR`, `DISTDIR`, and `PORTAGE_TMPDIR` are prepared as writable directories
 for the VM's `portage` user before each target build. This matters because
@@ -365,16 +402,17 @@ Illegal instruction
 simple run test (/usr/bin/cal) failed
 ```
 
-then the builder is still running a native/chroot-style install path, or Portage
-is not seeing a non-empty target `ROOT`. In the true-cross runner, glibc is
-merged into the target sysroot with `--root=<target sysroot>`, so Gentoo's glibc
-preinstall sanity check should not execute the freshly built target loader on
-the builder CPU.
+then Portage is not seeing a non-empty target `ROOT`/`SYSROOT`, or that ebuild
+phase is still trying to execute a freshly built target binary. In the
+true-cross runner, glibc is merged into the target sysroot with
+`--root=<target sysroot>`, so Gentoo's glibc preinstall sanity check should not
+execute the freshly built target loader on the builder CPU.
 
 Check the builder log for:
 
 ```text
 [portageforge] starting true-cross microarchitecture-only builder
+[portageforge] isolated BROOT: /var/lib/portageforge/broots/<target>/root
 [portageforge] target Portage tmpdir: /var/tmp/portageforge/targets/<target>
 ```
 
