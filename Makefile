@@ -15,7 +15,7 @@ help:
 	@printf '%s\n' '  make run                           Boot the QEMU true-cross builder VM'
 	@printf '%s\n' '  make export-target-state           Export target state on a Gentoo client'
 	@printf '%s\n' '  make check                         Syntax-check project shell scripts'
-	@printf '%s\n' '  make pristine                      Remove generated VM/build state'
+	@printf '%s\n' '  make pristine                      Remove VM and persistent build data disks'
 
 setup:
 	./scripts/setup-portageforge-builder

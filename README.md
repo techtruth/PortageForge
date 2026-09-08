@@ -67,6 +67,9 @@ x86_64-pc-linux-gnu-gcc
   receives the target's explicit CFLAGS/CXXFLAGS from make.conf
 ```
 
+Wrapper commands are discovered from the isolated BROOT's installed
+`<target-CHOST>-*` executables instead of a fixed binutils command list.
+
 That makes cross-aware ebuilds do the important split:
 
 ```text
@@ -173,6 +176,8 @@ The host only needs these tools:
 ```text
 curl
 genisoimage
+blkid
+mkfs.ext4
 qemu-img
 qemu-system-x86_64
 sha256sum
@@ -212,14 +217,29 @@ This creates:
 
 ```text
 images/portageforge.qcow2
+images/portageforge-data.raw
 images/seed.iso
 vm/targets/
-vm/data/targets/
+vm/data/
 ```
 
-The launcher exports `vm/targets/` as read-only and `vm/data/` as writable.
+`portageforge-data.raw` is a sparse 500 GiB ext4 data disk by default. Override
+its size when it is first created with, for example,
+`PORTAGEFORGE_DATA_DISK_SIZE=1T make setup`. The launcher attaches it as a
+VirtIO block device. The guest owns its normal Unix permissions, ACLs, xattrs,
+and file capabilities without a host-filesystem translation layer.
+
+The launcher exports `vm/targets/` and `vm/data/` as read-only shares.
+`vm/targets/` supplies target snapshots; `vm/data/` supplies only optional
+builder configuration. Writable target-build state and binpackages live on the
+data disk. Binpackages remain available through the HTTP service, but are no
+longer ordinary files under `vm/data/` on the host.
 Cloud-init installs the current `scripts/portageforge-builder` into the VM at
 `/usr/local/sbin/portageforge-builder` and starts it through systemd.
+
+Older `vm/data/targets/` caches are not imported into the new data disk. The
+first run therefore starts a fresh binhost cache. `make pristine` removes both
+the VM boot disk and the persistent data disk.
 
 Re-run `make setup` when you need to recreate the VM disks, change bootstrap
 SSH access, update the in-VM builder script, or change the service embedded in
@@ -243,6 +263,9 @@ PORTAGEFORGE_SYNC_RETRY_SECONDS=60
 PORTAGEFORGE_BUILD_INTERVAL_SECONDS=86400
 PORTAGEFORGE_BINHOST_PORT=8080
 ```
+
+`PORTAGEFORGE_BUILD_JOBS` defaults to one fewer than the VM-visible CPU count.
+The same value limits Portage concurrency and the GNU make load average.
 
 The QEMU launcher also accepts:
 
@@ -290,9 +313,11 @@ On VM startup, PortageForge does this:
 
 ```text
 mount host vm/targets at /mnt/portageforge-targets
-mount host vm/data at /mnt/portageforge-data
+mount host vm/data read-only at /mnt/portageforge-config
+mount the ext4 data disk at /var/lib/portageforge-data
 validate builder build commands
 update the builder runtime @world
+validate ACL, xattr, and file capability copying on the data disk
 start the HTTP binhost server
 ```
 
@@ -302,8 +327,8 @@ Each build cycle then does this:
 for each /mnt/portageforge-targets/*.tar:
   validate and load the target snapshot and package list
   confirm the target CHOST matches the builder GCC target
-  recreate /var/lib/portageforge/targets/<target>/sysroot from stage3
-  recreate /var/lib/portageforge/broots/<target>/root from stage3
+  recreate /var/lib/portageforge-data/state/targets/<target>/sysroot from stage3
+  recreate /var/lib/portageforge-data/state/broots/<target>/root from stage3
   prepare binpkg, distfiles, and Portage temp directories for the portage user
   copy the target /etc/portage policy into that sysroot
   append PortageForge cross-build settings
@@ -316,6 +341,7 @@ for each /mnt/portageforge-targets/*.tar:
   run emerge --sync from inside the isolated BROOT with the target config root
   compile/run BROOT wrapper probes and compile target wrapper probes
   emptytree-install target build dependencies for @system and the target package roots
+  refresh discovered wrappers and rerun the wrapper probes
   emerge @system and the target package roots with --emptytree --buildpkg
   run emaint binhost --fix for the target PKGDIR
   unmount the isolated BROOT runtime filesystems
@@ -327,9 +353,10 @@ is not supported.
 
 The target sysroot and isolated native BROOT are disposable builder state. They
 are recreated from stage3 for each target build so stale packages from earlier
-resolver attempts cannot stay installed and poison slot transitions. The binpkg
-cache, distfiles, and VM runtime root persist; the target sysroot and isolated
-BROOT do not.
+resolver attempts cannot stay installed and poison slot transitions. The raw
+data disk persists between VM boots and holds the binpkg cache, shared
+distfiles, build trees, sysroots, and BROOTs; the sysroot and BROOT contents are
+replaced at the start of each target build.
 
 The isolated native BROOT receives a copy of the target's Portage feature
 policy, including global `USE`, `package.use`, `package.accept_keywords`,
@@ -362,6 +389,9 @@ for the VM's `portage` user before each target build. This matters because
 Portage fetch/build workers do not always run as root. PortageForge also removes
 stale `.__portage_test_write__` and `*.__download__` files, then verifies the
 `portage` user can create and remove a probe file before `emerge` starts.
+PortageForge does not disable or exclude xattrs. Startup fails immediately if
+the data disk cannot create and copy a POSIX ACL, ordinary xattr, and file
+capability.
 
 ## Target Setup
 
@@ -412,8 +442,8 @@ Check the builder log for:
 
 ```text
 [portageforge] starting true-cross microarchitecture-only builder
-[portageforge] isolated BROOT: /var/lib/portageforge/broots/<target>/root
-[portageforge] target Portage tmpdir: /var/tmp/portageforge/targets/<target>
+[portageforge] isolated BROOT: /var/lib/portageforge-data/state/broots/<target>/root
+[portageforge] target Portage tmpdir: /var/lib/portageforge-data/tmp/targets/<target>
 ```
 
 If the build log still uses `/var/tmp/portageforge/portage/...`, recreate the

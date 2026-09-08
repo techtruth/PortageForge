@@ -10,6 +10,9 @@ BASE_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/${GENTOO_IMAGE_
 LATEST_FILE=latest-di-amd64-cloudinit.txt
 BOOT_IMAGE="$IMAGES_DIR/portageforge.qcow2"
 BOOT_IMAGE_SIZE=300G
+DATA_IMAGE="$IMAGES_DIR/portageforge-data.raw"
+DATA_IMAGE_SIZE=${PORTAGEFORGE_DATA_DISK_SIZE:-500G}
+DATA_IMAGE_LABEL=portageforge
 TARGETS_DIR="$VM_DIR/targets"
 DATA_DIR="$VM_DIR/data"
 SEED_DIR="$IMAGES_DIR/cloud-init"
@@ -86,6 +89,26 @@ fetch_boot_image() {
   qemu-img convert -O qcow2 "$IMAGES_DIR/$image_name" "$BOOT_IMAGE"
   qemu-img resize "$BOOT_IMAGE" "$BOOT_IMAGE_SIZE"
   printf '[setup-portageforge-builder] created boot disk %s (%s)\n' "$BOOT_IMAGE" "$BOOT_IMAGE_SIZE"
+}
+
+prepare_data_image() {
+  local filesystem
+  local label
+
+  if [[ -e "$DATA_IMAGE" ]]; then
+    filesystem=$(blkid -s TYPE -o value "$DATA_IMAGE" || true)
+    label=$(blkid -s LABEL -o value "$DATA_IMAGE" || true)
+    if [[ "$filesystem" != ext4 || "$label" != "$DATA_IMAGE_LABEL" ]]; then
+      printf '[setup-portageforge-builder] error: existing data disk is not ext4 with label %s: %s\n' "$DATA_IMAGE_LABEL" "$DATA_IMAGE" >&2
+      exit 1
+    fi
+    printf '[setup-portageforge-builder] using existing data disk %s\n' "$DATA_IMAGE"
+    return
+  fi
+
+  qemu-img create -q -f raw "$DATA_IMAGE" "$DATA_IMAGE_SIZE"
+  mkfs.ext4 -q -F -m 0 -L "$DATA_IMAGE_LABEL" "$DATA_IMAGE"
+  printf '[setup-portageforge-builder] created sparse ext4 data disk %s (%s)\n' "$DATA_IMAGE" "$DATA_IMAGE_SIZE"
 }
 
 create_seed_iso() {
@@ -236,15 +259,18 @@ EOF
 cd "$REPO_ROOT"
 
 require_command base64
+require_command blkid
 require_command curl
 require_command genisoimage
+require_command mkfs.ext4
 require_command qemu-img
 require_command sha256sum
 
-mkdir -p "$IMAGES_DIR" "$TARGETS_DIR" "$DATA_DIR/targets"
+mkdir -p "$IMAGES_DIR" "$TARGETS_DIR" "$DATA_DIR"
 printf '[setup-portageforge-builder] prepared %s and %s\n' "$IMAGES_DIR" "$VM_DIR"
 public_key=$(find_public_key)
 fetch_boot_image
+prepare_data_image
 create_seed_iso "$public_key"
 
 printf '[setup-portageforge-builder] setup complete\n'

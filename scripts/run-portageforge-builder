@@ -8,6 +8,7 @@ VM_DIR="$REPO_ROOT/vm"
 TARGETS_DIR="$VM_DIR/targets"
 DATA_DIR="$VM_DIR/data"
 DISK_IMAGE="$IMAGES_DIR/portageforge.qcow2"
+DATA_DISK_IMAGE="$IMAGES_DIR/portageforge-data.raw"
 SEED_ISO="$IMAGES_DIR/seed.iso"
 MEMORY_MB=${PORTAGEFORGE_MEMORY_MB:-8192}
 CPU_MODEL=${PORTAGEFORGE_QEMU_CPU:-max}
@@ -29,7 +30,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "$TARGETS_DIR" "$DATA_DIR/targets"
+mkdir -p "$TARGETS_DIR" "$DATA_DIR"
 
 if [[ ! -f "$OVMF_CODE" ]]; then
   printf '[run-portageforge-builder] error: OVMF firmware not found: %s\n' "$OVMF_CODE" >&2
@@ -39,6 +40,12 @@ fi
 
 if [[ ! -f "$DISK_IMAGE" ]]; then
   printf '[run-portageforge-builder] error: missing disk image: %s\n' "$DISK_IMAGE" >&2
+  printf '[run-portageforge-builder] create it with: make setup\n' >&2
+  exit 1
+fi
+
+if [[ ! -f "$DATA_DISK_IMAGE" ]]; then
+  printf '[run-portageforge-builder] error: missing data disk image: %s\n' "$DATA_DISK_IMAGE" >&2
   printf '[run-portageforge-builder] create it with: make setup\n' >&2
   exit 1
 fi
@@ -60,8 +67,10 @@ qemu_args=(
   -smbios type=0,uefi=on
   -drive "if=pflash,unit=0,readonly=on,file=$OVMF_CODE"
   -drive "file=$DISK_IMAGE,if=virtio,format=qcow2"
+  -drive "if=none,id=portageforge-data,file=$DATA_DISK_IMAGE,format=raw,cache=none,discard=unmap,detect-zeroes=unmap"
+  -device "virtio-blk-pci,drive=portageforge-data,serial=portageforge-data"
   -virtfs "local,path=$TARGETS_DIR,mount_tag=portageforge-targets,security_model=none,readonly=on"
-  -virtfs "local,path=$DATA_DIR,mount_tag=portageforge-data,security_model=mapped-xattr"
+  -virtfs "local,path=$DATA_DIR,mount_tag=portageforge-config,security_model=none,readonly=on"
   -device virtio-net-pci,netdev=net0
   -netdev "user,id=net0,hostfwd=tcp:${SSH_HOST_BIND}:${SSH_PORT}-:22,hostfwd=tcp:${BINHOST_HOST_BIND}:${BINHOST_HOST_PORT}-:8080"
   -serial mon:stdio
