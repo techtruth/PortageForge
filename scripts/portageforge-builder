@@ -27,6 +27,7 @@ BUILDER_COMMON_FLAGS=${PORTAGEFORGE_BUILDER_COMMON_FLAGS:-"-O2 -pipe -march=x86-
 BUILD_WRAPPERS_DIR=/usr/local/bin
 BROOT_PORTAGE_TMPDIR=/var/tmp/portageforge/broot
 CPU_COUNT=$(nproc 2>/dev/null || printf '1')
+MEMORY_KIB=$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo 2>/dev/null || true)
 HTTP_PID=
 TARGET_NAME=
 TARGET_CHOST=
@@ -40,9 +41,27 @@ PORTAGE_TMPDIR_PATH=
 BROOT_MOUNT_POINTS=()
 DATA_DISK_MOUNTED=false
 if [[ "$CPU_COUNT" -gt 1 ]]; then
-  DEFAULT_BUILD_JOBS=$((CPU_COUNT - 1))
+  CPU_JOB_LIMIT=$((CPU_COUNT - 1))
 else
-  DEFAULT_BUILD_JOBS=1
+  CPU_JOB_LIMIT=1
+fi
+MEMORY_JOB_LIMIT=$CPU_JOB_LIMIT
+if [[ "$MEMORY_KIB" =~ ^[0-9]+$ ]]; then
+  MEMORY_RESERVE_KIB=$((2 * 1024 * 1024))
+  MEMORY_PER_JOB_KIB=$((2 * 1024 * 1024))
+  if [[ "$MEMORY_KIB" -gt "$MEMORY_RESERVE_KIB" ]]; then
+    MEMORY_JOB_LIMIT=$(((MEMORY_KIB - MEMORY_RESERVE_KIB) / MEMORY_PER_JOB_KIB))
+  else
+    MEMORY_JOB_LIMIT=1
+  fi
+  if [[ "$MEMORY_JOB_LIMIT" -lt 1 ]]; then
+    MEMORY_JOB_LIMIT=1
+  fi
+fi
+if [[ "$CPU_JOB_LIMIT" -lt "$MEMORY_JOB_LIMIT" ]]; then
+  DEFAULT_BUILD_JOBS=$CPU_JOB_LIMIT
+else
+  DEFAULT_BUILD_JOBS=$MEMORY_JOB_LIMIT
 fi
 BUILD_JOBS=${PORTAGEFORGE_BUILD_JOBS:-$DEFAULT_BUILD_JOBS}
 CROSS_RESOLVER_ARGS=(
@@ -1476,7 +1495,8 @@ prepare_builder_from_snapshot() {
   printf '[portageforge] target sysroot: %s\n' "$TARGET_SYSROOT_PATH"
   printf '[portageforge] target Portage tmpdir: %s\n' "$PORTAGE_TMPDIR_PATH"
   printf '[portageforge] target binhost path: /targets/%s/binpkgs/\n' "$TARGET_NAME"
-  printf '[portageforge] using %s build job(s) with the same load ceiling\n' "$BUILD_JOBS"
+  printf '[portageforge] using %s build job(s) with the same load ceiling (default CPU limit %s, memory limit %s)\n' \
+    "$BUILD_JOBS" "$CPU_JOB_LIMIT" "$MEMORY_JOB_LIMIT"
   printf '[portageforge] loaded %s binhost package entries\n' "$(wc -l <"$TARGET_SYSROOT_PATH$TARGET_PACKAGE_SET")"
 }
 
