@@ -176,7 +176,6 @@ The host only needs these tools:
 ```text
 curl
 genisoimage
-blkid
 mkfs.ext4
 qemu-img
 qemu-system-x86_64

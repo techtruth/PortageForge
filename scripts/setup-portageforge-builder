@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+export PATH
+
 IMAGES_DIR=images
 VM_DIR=vm
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
@@ -92,16 +95,7 @@ fetch_boot_image() {
 }
 
 prepare_data_image() {
-  local filesystem
-  local label
-
   if [[ -e "$DATA_IMAGE" ]]; then
-    filesystem=$(blkid -s TYPE -o value "$DATA_IMAGE" || true)
-    label=$(blkid -s LABEL -o value "$DATA_IMAGE" || true)
-    if [[ "$filesystem" != ext4 || "$label" != "$DATA_IMAGE_LABEL" ]]; then
-      printf '[setup-portageforge-builder] error: existing data disk is not ext4 with label %s: %s\n' "$DATA_IMAGE_LABEL" "$DATA_IMAGE" >&2
-      exit 1
-    fi
     printf '[setup-portageforge-builder] using existing data disk %s\n' "$DATA_IMAGE"
     return
   fi
@@ -259,7 +253,6 @@ EOF
 cd "$REPO_ROOT"
 
 require_command base64
-require_command blkid
 require_command curl
 require_command genisoimage
 require_command mkfs.ext4
