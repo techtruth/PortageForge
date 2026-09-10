@@ -35,6 +35,8 @@ TARGET_PACKAGE_LIST=
 TARGET_SYSROOT_PATH=
 BROOT_PATH=
 TARGET_WRAPPERS_DIR=
+TARGET_EXECUTION_POLICY_REPO=
+TARGET_EXECUTION_POLICY_REPO_NAME=portageforge-target-execution
 PKGDIR_PATH=
 DISTDIR_PATH=
 PORTAGE_TMPDIR_PATH=
@@ -834,6 +836,106 @@ target_config_portage_envvar() {
     portageq envvar "$variable_name"
 }
 
+ensure_repos_conf_directory() {
+  local config_path="$1/etc/portage/repos.conf"
+  local original_path="${config_path}.portageforge-original"
+
+  if [[ -d "$config_path" ]]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$config_path")"
+  if [[ -e "$config_path" || -L "$config_path" ]]; then
+    if [[ -e "$original_path" || -L "$original_path" ]]; then
+      printf '[portageforge] error: cannot preserve existing repository config at %s\n' "$config_path" >&2
+      return 1
+    fi
+    mv "$config_path" "$original_path"
+    mkdir "$config_path"
+    mv "$original_path" "$config_path/00-target.conf"
+  else
+    mkdir "$config_path"
+  fi
+}
+
+write_target_execution_repository_config() {
+  local config_root=$1
+  local repos_conf="$config_root/etc/portage/repos.conf/99-portageforge-target-execution.conf"
+
+  ensure_repos_conf_directory "$config_root" || return 1
+  {
+    printf '[DEFAULT]\n'
+    printf 'eclass-overrides = %s\n\n' "$TARGET_EXECUTION_POLICY_REPO_NAME"
+    printf '[%s]\n' "$TARGET_EXECUTION_POLICY_REPO_NAME"
+    printf 'location = %s\n' "$TARGET_EXECUTION_POLICY_REPO"
+    printf 'masters = gentoo\n'
+    printf 'auto-sync = no\n'
+    printf 'eclass-overrides =\n'
+  } >"$repos_conf"
+}
+
+refresh_target_execution_policy() {
+  local destination="$TARGET_EXECUTION_POLICY_REPO/eclass/sysroot.eclass"
+  local source=/var/db/repos/gentoo/eclass/sysroot.eclass
+
+  if [[ ! -r "$source" ]]; then
+    printf '[portageforge] error: Gentoo sysroot eclass is missing: %s\n' "$source" >&2
+    return 1
+  fi
+  if ! grep -Fq 'sysroot_make_run_prefixed()' "$source"; then
+    printf '[portageforge] error: Gentoo sysroot eclass lacks its target execution interface\n' >&2
+    return 1
+  fi
+  cp "$source" "$destination"
+  {
+    printf '\n# PortageForge targets cannot execute on the builder CPU.\n'
+    printf 'sysroot_make_run_prefixed() {\n'
+    printf '\treturn 2\n'
+    printf '}\n'
+  } >>"$destination"
+}
+
+prepare_target_execution_policy() {
+  TARGET_EXECUTION_POLICY_REPO="$PORTAGE_TMPDIR_PATH/target-execution-policy-repo"
+  mkdir -p \
+    "$TARGET_EXECUTION_POLICY_REPO/eclass" \
+    "$TARGET_EXECUTION_POLICY_REPO/metadata" \
+    "$TARGET_EXECUTION_POLICY_REPO/profiles"
+  printf '%s\n' "$TARGET_EXECUTION_POLICY_REPO_NAME" >"$TARGET_EXECUTION_POLICY_REPO/profiles/repo_name"
+  {
+    printf 'masters = gentoo\n'
+    printf 'thin-manifests = true\n'
+  } >"$TARGET_EXECUTION_POLICY_REPO/metadata/layout.conf"
+
+  refresh_target_execution_policy || return 1
+  write_target_execution_repository_config "$TARGET_SYSROOT_PATH" || return 1
+  write_target_execution_repository_config "$BROOT_PATH" || return 1
+  printf '[portageforge] declared target executables non-runnable through Gentoo sysroot policy\n'
+}
+
+validate_target_execution_policy() {
+  local eclass_path
+  local found=false
+  local repository_name
+  local wanted_path="$TARGET_EXECUTION_POLICY_REPO/eclass/sysroot.eclass"
+
+  while IFS= read -r repository_name; do
+    [[ -n "$repository_name" ]] || continue
+    found=true
+    if ! eclass_path=$(cross_run portageq eclass_path "$TARGET_SYSROOT_PATH" "$repository_name" sysroot); then
+      printf '[portageforge] error: repository %s cannot resolve the sysroot eclass\n' "$repository_name" >&2
+      return 1
+    fi
+    if [[ "$eclass_path" != "$wanted_path" ]]; then
+      printf '[portageforge] error: target execution policy is inactive for repository %s\n' "$repository_name" >&2
+      return 1
+    fi
+  done < <(cross_run portageq get_repos "$TARGET_SYSROOT_PATH")
+  if [[ "$found" != true ]]; then
+    printf '[portageforge] error: target has no configured repositories\n' >&2
+    return 1
+  fi
+}
+
 write_make_conf_assignment() {
   local variable_name=$1
   local value=$2
@@ -959,17 +1061,12 @@ copy_broot_locale_state() {
 
 }
 
-copy_target_environment_state() {
+copy_target_locale_state() {
   local snapshot_path
 
   for snapshot_path in \
-    etc/env.d \
-    etc/eselect \
-    etc/python-exec \
-    etc/java-config-2 \
     etc/locale.conf \
-    etc/locale.gen \
-    usr/src/linux; do
+    etc/locale.gen; do
     copy_snapshot_path "$snapshot_path"
   done
 }
@@ -1045,8 +1142,8 @@ apply_target_portage_config() {
   fi
   printf '[portageforge] writing target make.conf\n'
   write_target_make_conf
-  printf '[portageforge] copying target runtime environment state\n'
-  copy_target_environment_state
+  printf '[portageforge] copying target locale state\n'
+  copy_target_locale_state
   printf '[portageforge] validating target Portage flags\n'
   validate_no_native_flags
   printf '[portageforge] target Portage snapshot applied\n'
@@ -1160,7 +1257,7 @@ create_tool_wrappers() {
     return 1
   fi
   write_tool_wrapper passthrough "$pkg_config" "$builder_destination/$BUILDER_CHOST-pkg-config" || return 1
-  write_tool_wrapper target-pkg-config "$pkg_config" "$TARGET_WRAPPERS_DIR/$TARGET_CHOST-pkg-config"
+  write_tool_wrapper target-pkg-config "$pkg_config" "$TARGET_WRAPPERS_DIR/$TARGET_CHOST-pkg-config" || return 1
 }
 
 target_portage_envvar() {
@@ -1487,6 +1584,7 @@ prepare_builder_from_snapshot() {
   set_target_profile_link "$profile" || return 1
   apply_broot_portage_config || return 1
   set_broot_profile_link "$profile" || return 1
+  prepare_target_execution_policy || return 1
   create_tool_wrappers || return 1
 
   printf '[portageforge] builder CBUILD: %s\n' "$BUILDER_CHOST"
@@ -1548,6 +1646,16 @@ build_target() {
   fi
 
   if [[ "$result" -eq 0 ]] && ! set_broot_profile_link "$(metadata_value profile)"; then
+    result=1
+  fi
+
+  if [[ "$result" -eq 0 ]] && ! refresh_target_execution_policy; then
+    printf '[portageforge] error: could not refresh target execution policy\n' >&2
+    result=1
+  fi
+
+  if [[ "$result" -eq 0 ]] && ! validate_target_execution_policy; then
+    printf '[portageforge] error: target execution policy validation failed for %s\n' "$TARGET_NAME" >&2
     result=1
   fi
 

@@ -143,15 +143,14 @@ metadata/hostname
 metadata/profile
 metadata/chost
 metadata/exported-at
-etc/env.d/                      # when present
-etc/eselect/                    # when present
-etc/java-config-2/              # when present
 etc/locale.conf                 # when present
 etc/locale.gen                  # when present
-etc/python-exec/                # when present
 etc/portage/
-usr/src/linux                   # when present
 ```
+
+Package-managed runtime state such as `etc/env.d`, `etc/eselect`,
+`etc/python-exec`, and `etc/java-config-2` is intentionally excluded. Packages
+create that state when they merge into the fresh target sysroot.
 
 The package sidecar contains the target's selected package roots from
 `/var/lib/portage/world`. PortageForge also builds `@system` and the dependency
@@ -256,15 +255,18 @@ Example:
 ```sh
 PORTAGEFORGE_BUILDER_CHOST=x86_64-portageforge-linux-gnu
 PORTAGEFORGE_BUILDER_COMMON_FLAGS="-O2 -pipe -march=x86-64"
-PORTAGEFORGE_BUILD_JOBS=8
+PORTAGEFORGE_BUILD_JOBS=2
 PORTAGEFORGE_SYNC_ATTEMPTS=3
 PORTAGEFORGE_SYNC_RETRY_SECONDS=60
 PORTAGEFORGE_BUILD_INTERVAL_SECONDS=86400
 PORTAGEFORGE_BINHOST_PORT=8080
 ```
 
-`PORTAGEFORGE_BUILD_JOBS` defaults to one fewer than the VM-visible CPU count.
-The same value limits Portage concurrency and the GNU make load average.
+`PORTAGEFORGE_BUILD_JOBS` defaults to the lower of one fewer than the
+VM-visible CPU count and a conservative memory limit. The memory limit reserves
+2 GiB for the guest and budgets 2 GiB per build job. The same value limits
+Portage concurrency and the GNU make load average. An explicit setting overrides
+both default limits.
 
 The QEMU launcher also accepts:
 
@@ -277,6 +279,10 @@ PORTAGEFORGE_HOST_SSH_PORT=2222
 PORTAGEFORGE_HOST_BINHOST_BIND=127.0.0.1
 PORTAGEFORGE_HOST_BINHOST_PORT=8080
 ```
+
+The VM receives 8192 MiB by default; QEMU does not automatically assign all
+host memory to it. Set `PORTAGEFORGE_MEMORY_MB` in the environment that runs
+`make run`, while leaving enough RAM for the host.
 
 Using KVM is fine for true-cross mode because target package binaries are not
 executed by the builder.
@@ -329,12 +335,13 @@ for each /mnt/portageforge-targets/*.tar:
   recreate /var/lib/portageforge-data/state/targets/<target>/sysroot from stage3
   recreate /var/lib/portageforge-data/state/broots/<target>/root from stage3
   prepare binpkg, distfiles, and Portage temp directories for the portage user
-  copy the target /etc/portage policy into that sysroot
+  copy the target /etc/portage policy and locale configuration into that sysroot
   append PortageForge cross-build settings
   select the target profile from the synced repository
   copy target feature policy into the isolated native BROOT
   write builder-safe compiler settings into the isolated native BROOT
   select the isolated BROOT profile from the synced repository
+  declare target executables non-runnable through Gentoo's shared sysroot policy
   create CBUILD wrappers in isolated BROOT /usr/local/bin and CHOST wrappers
   mount repo, data, target sysroot, and target tmp paths into the isolated BROOT
   run emerge --sync from inside the isolated BROOT with the target config root
@@ -382,6 +389,14 @@ snapshot's `/etc/portage` policy. Native `BDEPEND` tools resolve against the
 isolated BROOT; target `DEPEND` and `RDEPEND` resolve against the target
 sysroot. Cross emerges use `--autounmask=n`; missing USE, keyword, or
 USE_EXPAND target policy must be fixed on the target and exported again.
+
+Gentoo's shared `sysroot.eclass` normally assumes that target executables can
+run directly when `CBUILD` and `CHOST` use the same ISA. That assumption does
+not hold when the builder CPU lacks the target microarchitecture features.
+PortageForge creates a per-target eclass override from the currently synced
+Gentoo eclass and makes its standard `sysroot_make_run_prefixed` interface
+report that target execution is unavailable. Build-system eclasses consume
+that shared answer without package or build-system-specific handling.
 
 `PKGDIR`, `DISTDIR`, and `PORTAGE_TMPDIR` are prepared as writable directories
 for the VM's `portage` user before each target build. This matters because

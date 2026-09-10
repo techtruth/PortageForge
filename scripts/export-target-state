@@ -152,13 +152,8 @@ PACKAGE_ENTRIES=()
 mkdir -p "$snapshot_dir/etc" "$snapshot_dir/metadata"
 cp -a "$PORTAGE_DIR" "$snapshot_dir/etc/portage"
 rm -f "$snapshot_dir/etc/portage/sets/portageforge-binhost-packages"
-copy_if_present /etc/env.d "$snapshot_dir/etc/env.d"
-copy_if_present /etc/eselect "$snapshot_dir/etc/eselect"
-copy_if_present /etc/python-exec "$snapshot_dir/etc/python-exec"
-copy_if_present /etc/java-config-2 "$snapshot_dir/etc/java-config-2"
 copy_if_present /etc/locale.gen "$snapshot_dir/etc/locale.gen"
 copy_if_present /etc/locale.conf "$snapshot_dir/etc/locale.conf"
-copy_if_present /usr/src/linux "$snapshot_dir/usr/src/linux"
 load_package_entries
 
 printf '%s\n' "$target_hostname" >"$snapshot_dir/metadata/hostname"
