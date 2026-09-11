@@ -914,13 +914,19 @@ prepare_target_execution_policy() {
 
 validate_target_execution_policy() {
   local eclass_path
-  local found=false
   local repository_name
+  local repositories
   local wanted_path="$TARGET_EXECUTION_POLICY_REPO/eclass/sysroot.eclass"
 
-  while IFS= read -r repository_name; do
-    [[ -n "$repository_name" ]] || continue
-    found=true
+  if ! repositories=$(cross_run portageq get_repos "$TARGET_SYSROOT_PATH"); then
+    printf '[portageforge] error: could not read configured target repositories\n' >&2
+    return 1
+  fi
+  if [[ -z "$repositories" ]]; then
+    printf '[portageforge] error: target has no configured repositories\n' >&2
+    return 1
+  fi
+  for repository_name in $repositories; do
     if ! eclass_path=$(cross_run portageq eclass_path "$TARGET_SYSROOT_PATH" "$repository_name" sysroot); then
       printf '[portageforge] error: repository %s cannot resolve the sysroot eclass\n' "$repository_name" >&2
       return 1
@@ -929,11 +935,7 @@ validate_target_execution_policy() {
       printf '[portageforge] error: target execution policy is inactive for repository %s\n' "$repository_name" >&2
       return 1
     fi
-  done < <(cross_run portageq get_repos "$TARGET_SYSROOT_PATH")
-  if [[ "$found" != true ]]; then
-    printf '[portageforge] error: target has no configured repositories\n' >&2
-    return 1
-  fi
+  done
 }
 
 write_make_conf_assignment() {
