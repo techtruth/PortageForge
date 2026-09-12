@@ -345,6 +345,7 @@ for each /mnt/portageforge-targets/*.tar:
   create CBUILD wrappers in isolated BROOT /usr/local/bin and CHOST wrappers
   mount repo, data, target sysroot, and target tmp paths into the isolated BROOT
   run emerge --sync from inside the isolated BROOT with the target config root
+  install Gentoo's maintained cross-build CONFIG_SITE policy in the isolated BROOT
   compile/run BROOT wrapper probes and compile target wrapper probes
   emptytree-install target build dependencies for @system and the target package roots
   refresh discovered wrappers and rerun the wrapper probes
@@ -397,6 +398,11 @@ PortageForge creates a per-target eclass override from the currently synced
 Gentoo eclass and makes its standard `sysroot_make_run_prefixed` interface
 report that target execution is unavailable. Build-system eclasses consume
 that shared answer without package or build-system-specific handling.
+
+The isolated BROOT installs Gentoo's `sys-devel/crossdev` site policy and
+exports its standard `/usr/share/config.site` during target emerges. This
+supplies maintained target-platform answers for Autoconf checks that cannot run
+while cross-compiling, rather than adding exceptions for individual packages.
 
 `PKGDIR`, `DISTDIR`, and `PORTAGE_TMPDIR` are prepared as writable directories
 for the VM's `portage` user before each target build. This matters because
