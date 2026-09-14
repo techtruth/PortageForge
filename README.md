@@ -69,6 +69,9 @@ x86_64-pc-linux-gnu-gcc
 
 Wrapper commands are discovered from the isolated BROOT's installed
 `<target-CHOST>-*` executables instead of a fixed binutils command list.
+CBUILD compiler wrappers are transparent aliases; builder flags come from the
+BROOT Portage environment so package-required overrides such as `-O0` remain
+effective.
 
 That makes cross-aware ebuilds do the important split:
 

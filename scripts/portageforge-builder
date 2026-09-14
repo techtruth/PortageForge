@@ -1180,12 +1180,6 @@ write_tool_wrapper() {
     printf '#!/usr/bin/env bash\n'
     printf 'set -e\n'
     case "$mode" in
-      builder-compiler)
-        printf 'PORTAGEFORGE_WRAPPER_FLAGS=%q\n' "$BUILDER_COMMON_FLAGS"
-        printf '# shellcheck disable=SC2086\n'
-        printf 'set -- "$@" $PORTAGEFORGE_WRAPPER_FLAGS\n'
-        printf 'exec %q "$@"\n' "$native_command"
-        ;;
       target-compiler)
         printf 'exec %q --sysroot=%q -B%q "$@"\n' "$native_command" "$TARGET_SYSROOT_PATH" "$TARGET_WRAPPERS_DIR/$TARGET_CHOST-"
         ;;
@@ -1240,7 +1234,7 @@ create_tool_wrappers() {
       [[ -e "$builder_wrapper" ]] && continue
       case "$tool_name" in
         cc|c++|cpp|cpp-[0-9]*|gcc|gcc-[0-9]*|g++|g++-[0-9]*)
-          write_tool_wrapper builder-compiler "$native_path" "$builder_wrapper" || return 1
+          write_tool_wrapper passthrough "$native_path" "$builder_wrapper" || return 1
           write_tool_wrapper target-compiler "$native_path" "$target_wrapper" || return 1
           ;;
         *)
