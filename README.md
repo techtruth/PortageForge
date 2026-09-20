@@ -336,7 +336,7 @@ for each /mnt/portageforge-targets/*.tar:
   validate and load the target snapshot and package list
   confirm the target CHOST matches the builder GCC target
   recreate /var/lib/portageforge-data/state/targets/<target>/sysroot from stage3
-  recreate /var/lib/portageforge-data/state/broots/<target>/root from stage3
+  seed /var/lib/portageforge-data/state/broots/<target>/root from stage3 when absent
   prepare binpkg, distfiles, and Portage temp directories for the portage user
   copy the target /etc/portage policy and locale configuration into that sysroot
   append PortageForge cross-build settings
@@ -348,6 +348,7 @@ for each /mnt/portageforge-targets/*.tar:
   create CBUILD wrappers in isolated BROOT /usr/local/bin and CHOST wrappers
   mount repo, data, target sysroot, and target tmp paths into the isolated BROOT
   run emerge --sync from inside the isolated BROOT with the target config root
+  update the maintained isolated BROOT native @world
   install Gentoo's maintained cross-build CONFIG_SITE policy in the isolated BROOT
   compile/run BROOT wrapper probes and compile target wrapper probes
   emptytree-install target build dependencies for @system and the target package roots
@@ -361,12 +362,12 @@ sleep 24 hours
 PortageForge emits modern `.gpkg.tar` binary packages. The legacy `xpak` format
 is not supported.
 
-The target sysroot and isolated native BROOT are disposable builder state. They
-are recreated from stage3 for each target build so stale packages from earlier
-resolver attempts cannot stay installed and poison slot transitions. The raw
-data disk persists between VM boots and holds the binpkg cache, shared
-distfiles, build trees, sysroots, and BROOTs; the sysroot and BROOT contents are
-replaced at the start of each target build.
+The target sysroot is disposable builder state and is recreated from stage3 for
+each target build. The isolated native BROOT is persistent per target policy:
+it is seeded from stage3 once, then its builder-runnable native `@world` is
+updated before every target build. This preserves a working native toolchain
+across repository updates while target outputs remain clean. PortageForge seeds
+a BROOT only when one is absent or incomplete.
 
 The isolated native BROOT receives a copy of the target's Portage feature
 policy, including global `USE`, `package.use`, `package.accept_keywords`,

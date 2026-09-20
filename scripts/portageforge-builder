@@ -711,18 +711,22 @@ prepare_target_roots() {
   fi
   printf '%s\n' "$variant" >"$TARGET_SYSROOT_PATH/.portageforge-stage3-variant"
 
-  printf '[portageforge] recreating fresh %s isolated native BROOT for %s\n' "$variant" "$TARGET_NAME"
-  if ! unmount_stale_broot_mounts; then
-    rm -rf "$stage3_download_dir"
-    return 1
+  if [[ -x "$BROOT_PATH/usr/bin/emerge" ]]; then
+    printf '[portageforge] reusing maintained isolated native BROOT for %s\n' "$TARGET_NAME"
+  else
+    printf '[portageforge] seeding isolated native BROOT for %s from %s\n' "$TARGET_NAME" "$variant"
+    if ! unmount_stale_broot_mounts; then
+      rm -rf "$stage3_download_dir"
+      return 1
+    fi
+    rm -rf "$BROOT_PATH"
+    mkdir -p "$BROOT_PATH"
+    if ! extract_stage3_root "$archive_path" "$BROOT_PATH"; then
+      rm -rf "$stage3_download_dir"
+      return 1
+    fi
+    printf '%s\n' "$variant" >"$BROOT_PATH/.portageforge-stage3-variant"
   fi
-  rm -rf "$BROOT_PATH"
-  mkdir -p "$BROOT_PATH"
-  if ! extract_stage3_root "$archive_path" "$BROOT_PATH"; then
-    rm -rf "$stage3_download_dir"
-    return 1
-  fi
-  printf '%s\n' "$variant" >"$BROOT_PATH/.portageforge-stage3-variant"
 
   rm -rf "$stage3_download_dir"
 }
@@ -1391,12 +1395,27 @@ generate_broot_locales() {
   broot_run locale-gen
 }
 
+update_broot_native_system() {
+  printf '[portageforge] updating maintained isolated BROOT native @world\n'
+  broot_run emerge \
+    --getbinpkg=n \
+    --usepkg=n \
+    --buildpkg=n \
+    --update \
+    --deep \
+    --newuse \
+    --jobs="$BUILD_JOBS" \
+    --load-average="$BUILD_JOBS" \
+    @world
+}
+
 install_broot_cross_config() {
   local required_path
 
   printf '[portageforge] installing Gentoo cross-build site policy in isolated BROOT\n'
   if ! broot_run emerge \
     --oneshot \
+    --update \
     --usepkg=n \
     --getbinpkg=n \
     --buildpkg=n \
@@ -1672,6 +1691,11 @@ build_target() {
   fi
 
   if [[ "$result" -eq 0 ]] && ! set_broot_profile_link "$(metadata_value profile)"; then
+    result=1
+  fi
+
+  if [[ "$result" -eq 0 ]] && ! update_broot_native_system; then
+    printf '[portageforge] error: native BROOT update failed for %s\n' "$TARGET_NAME" >&2
     result=1
   fi
 
