@@ -342,7 +342,7 @@ for each /mnt/portageforge-targets/*.tar:
   append PortageForge cross-build settings
   select the target profile from the synced repository
   copy target feature policy into the isolated native BROOT
-  write builder-safe compiler settings into the isolated native BROOT
+  write builder-safe native-tuple compiler settings into the isolated BROOT
   select the isolated BROOT profile from the synced repository
   declare target executables non-runnable through Gentoo's shared sysroot policy
   create CBUILD wrappers in isolated BROOT /usr/local/bin and CHOST wrappers
@@ -374,10 +374,10 @@ policy, including global `USE`, `package.use`, `package.accept_keywords`,
 masks, unmask files, licenses, and non-CPU `USE_EXPAND` values such as
 `VIDEO_CARDS`, `LLVM_TARGETS`, `PYTHON_TARGETS`, and `LUA_SINGLE_TARGET`.
 PortageForge replaces the BROOT `make.conf` with generated builder-safe output
-policy: `CBUILD` and `CHOST` are the fake builder tuple, `ACCEPT_CHOSTS`
-permits both the fake builder tuple and the target tuple during stage3
-bootstrap, and `COMMON_FLAGS`, `CFLAGS`, `CXXFLAGS`, `FCFLAGS`, and `FFLAGS`
-use `PORTAGEFORGE_BUILDER_COMMON_FLAGS`. Target `package.env` and target
+policy: `CBUILD`, `CHOST`, and `ACCEPT_CHOSTS` use the builder compiler's real
+native tuple, and `COMMON_FLAGS`, `CFLAGS`, `CXXFLAGS`, `FCFLAGS`, and `FFLAGS`
+use `PORTAGEFORGE_BUILDER_COMMON_FLAGS`. The fake builder tuple exists only for
+target cross-emerges. Target `package.env` and target
 `/etc/portage/env` are not copied into BROOT.
 
 Target compiler flags, CPU flags, target `CHOST`, target `CTARGET`, and target
